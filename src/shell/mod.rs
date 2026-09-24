@@ -272,6 +272,41 @@ struct AppState {
     opts: RunOptions,
 }
 
+/// Window size for windowed mode: the monitor minus headroom for the window
+/// frame WSLg adds. Sizing to the exact monitor area makes the frame push the
+/// window off-screen (it mapped at +38+59 on a 1920x1200 display), which looks
+/// like the shell never launched at all.
+fn fitted_window_size() -> (i32, i32) {
+    let (mut w, mut h) = (1280, 720);
+    if let Some(disp) = gtk::gdk::Display::default() {
+        use gtk::gdk::prelude::MonitorExt;
+        use gtk::gio::prelude::ListModelExt;
+        if let Some(mon) = disp
+            .monitors()
+            .item(0)
+            .and_then(|o| o.downcast::<gtk::gdk::Monitor>().ok())
+        {
+            let g = MonitorExt::geometry(&mon);
+            w = (g.width() - 80).max(640);
+            h = (g.height() - 120).max(480);
+        }
+    }
+    (w, h)
+}
+
+/// Bring the shell window back on screen, re-applying the fitted size so it
+/// never comes back larger than the display after an app was hidden.
+fn show_shell(state: &AppState) {
+    if state.opts.fullscreen && !state.opts.windowed {
+        state.window.present();
+        state.window.fullscreen();
+    } else {
+        let (w, h) = fitted_window_size();
+        state.window.set_default_size(w, h);
+        state.window.present();
+    }
+}
+
 pub fn run(opts: RunOptions) -> Result<()> {
     normalize_home();
     configure_graphics_backend();
@@ -370,23 +405,7 @@ fn activate(main_loop: &glib::MainLoop, opts: &RunOptions) -> Result<()> {
     if opts.fullscreen {
         window.fullscreen();
     } else {
-        // Size to the connected monitor's area instead of a fixed 1920x1080:
-        // on WSLg displays smaller than that, a maximized window maps larger
-        // than the screen and only a taskbar stub is visible.
-        let (mut w, mut h) = (1280, 720);
-        if let Some(disp) = gtk::gdk::Display::default() {
-            use gtk::gdk::prelude::MonitorExt;
-            use gtk::gio::prelude::ListModelExt;
-            if let Some(mon) = disp
-                .monitors()
-                .item(0)
-                .and_then(|o| o.downcast::<gtk::gdk::Monitor>().ok())
-            {
-                let g = MonitorExt::geometry(&mon);
-                w = g.width();
-                h = g.height();
-            }
-        }
+        let (w, h) = fitted_window_size();
         log::debug!("windowed size {w}x{h}");
         window.set_default_size(w, h);
     }
@@ -1055,10 +1074,7 @@ fn handle_core_event(state: &AppState, v: &Value) {
     if v.get("_internal").and_then(|x| x.as_bool()).unwrap_or(false)
         && v["event"].as_str() == Some("_launch_failed")
     {
-        state.window.present();
-        if state.opts.fullscreen && !state.opts.windowed {
-            state.window.fullscreen();
-        }
+        show_shell(state);
         log::warn!("{} exited on start (code {:?})", v["title"].as_str().unwrap_or("?"), v["code"].as_i64());
     }
     if v.get("_internal").and_then(|x| x.as_bool()).unwrap_or(false)
@@ -1082,10 +1098,7 @@ fn handle_core_event(state: &AppState, v: &Value) {
                 }
             }
             log::info!("{} closed after {secs}s", r.title);
-            state.window.present();
-            if state.opts.fullscreen && !state.opts.windowed {
-                state.window.fullscreen();
-            }
+            show_shell(state);
         }
     }
     ui::dispatch(&state.webview, v);
