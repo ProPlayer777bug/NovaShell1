@@ -730,6 +730,53 @@ fn route(state: &AppState, msg: Value) {
             }
         }
 
+        // Look for game files matching this console's extensions in the usual
+        // places, so a game the user opened/copied in the file manager shows
+        // up as "Play" without hunting for it.
+        "roms:scan" => {
+            let game_id = msg["id"].as_str().unwrap_or("").to_string();
+            let game = state.library.borrow().get(&game_id).cloned();
+            match game {
+                Some(g) => {
+                    let exts: Vec<String> = g.rom_exts.iter().map(|e| e.to_lowercase()).collect();
+                    let lib = crate::roms::RomLibrary::load();
+                    let known = lib.games_for(&game_id);
+                    let mut found: Vec<Value> = Vec::new();
+                    for dir in game_search_dirs() {
+                        let Ok(entries) = std::fs::read_dir(&dir) else {
+                            continue;
+                        };
+                        for e in entries.flatten() {
+                            let p = e.path();
+                            if !p.is_file() {
+                                continue;
+                            }
+                            let ext = p
+                                .extension()
+                                .map(|x| x.to_string_lossy().to_lowercase())
+                                .unwrap_or_default();
+                            if !exts.contains(&ext) {
+                                continue;
+                            }
+                            let path = p.to_string_lossy().to_string();
+                            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                            found.push(json!({
+                                "name": p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                                "path": path,
+                                "size": size,
+                                "known": known.contains(&path),
+                            }));
+                        }
+                        if found.len() >= 200 {
+                            break;
+                        }
+                    }
+                    reply(state, id, json!({ "ok": true, "games": found }));
+                }
+                None => reply(state, id, json!({ "ok": false, "error": "game not found" })),
+            }
+        }
+
         "files:list" => {
             let path = msg["path"].as_str().unwrap_or("").to_string();
             let out = list_folder(&path);
@@ -1075,15 +1122,33 @@ fn launch_by_id(state: &AppState, game_id: &str, rom: Option<&str>, id: &str) {
     }
     if let Some(rom) = rom {
         if !rom.is_empty() {
-            if !std::path::Path::new(rom).exists() {
+            let src = std::path::Path::new(rom);
+            if !src.exists() {
                 reply(state, id, json!({ "ok": false, "error": "ROM not found" }));
                 return;
             }
-            spec = spec.arg(rom);
+            // Keep every game inside its console folder: a file picked
+            // elsewhere (Desktop, Downloads, a Windows drive) is copied in
+            // first, so the library always points at ~/PS2, ~/Wii, ...
+            let rom_path = match console_rom_dir(&game) {
+                Some(dir) if !src.starts_with(&dir) => {
+                    let _ = std::fs::create_dir_all(&dir);
+                    match copy_into(src, &dir) {
+                        Ok(dest) => dest,
+                        Err(e) => {
+                            log::warn!("could not copy game into console folder: {e}");
+                            src.to_path_buf()
+                        }
+                    }
+                }
+                _ => src.to_path_buf(),
+            };
+            let rom_arg = rom_path.to_string_lossy().to_string();
+            spec = spec.arg(&rom_arg);
             // Remember it so this emulator can list its games next time.
             let mut lib = crate::roms::RomLibrary::load();
-            lib.remember(game_id, rom);
-            log::info!("{} (rom: {rom})", game.title);
+            lib.remember(game_id, &rom_arg);
+            log::info!("{} (rom: {rom_arg})", game.title);
         }
     }
     match launch_spec(state, &spec, Some(game_id)) {
@@ -1228,6 +1293,73 @@ fn console_polish(program: &str) -> Vec<String> {
         "pcsx2" | "pcsx2-qt" => vec!["--fullscreen".into()],
         _ => vec![],
     }
+}
+
+/// The console's own game folder (e.g. `~/PS2`) for an emulator tile.
+fn console_rom_dir(game: &Game) -> Option<std::path::PathBuf> {
+    let dir = game.rom_dir.as_ref()?;
+    Some(dirs::home_dir().unwrap_or_default().join(dir))
+}
+
+/// Copy `src` into `dir`, never overwriting: "Game.iso", "Game (1).iso", ...
+fn copy_into(src: &std::path::Path, dir: &std::path::Path) -> Result<std::path::PathBuf> {
+    let name = src
+        .file_name()
+        .map(|n| n.to_os_string())
+        .ok_or_else(|| anyhow!("game file has no name"))?;
+    let mut dest = dir.join(&name);
+    if dest.exists() {
+        let stem = src
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "game".into());
+        let ext = src
+            .extension()
+            .map(|e| format!(".{}", e.to_string_lossy()))
+            .unwrap_or_default();
+        for n in 1..1000 {
+            dest = dir.join(format!("{stem} ({n}){ext}"));
+            if !dest.exists() {
+                break;
+            }
+        }
+    }
+    log::info!("copying game into {}", dir.display());
+    std::fs::copy(src, &dest)?;
+    Ok(dest)
+}
+
+/// Folders searched for game files when the user picks one in the file
+/// manager: the console folder plus the usual download spots, including the
+/// Windows drives mounted into WSL.
+fn game_search_dirs() -> Vec<std::path::PathBuf> {
+    let home = dirs::home_dir().unwrap_or_default();
+    let mut dirs = vec![
+        home.join("PS2"),
+        home.join("PSX"),
+        home.join("PS3"),
+        home.join("Xbox"),
+        home.join("Wii"),
+        home.join("Nintendo"),
+        home.join("Desktop"),
+        home.join("Downloads"),
+        home.join("Documents"),
+        home.join("Videos"),
+    ];
+    for extra in [
+        "/mnt/c/Users/dell/Desktop",
+        "/mnt/c/Users/dell/Downloads",
+        "/mnt/c/Users/dell/Videos",
+        "/mnt/d/Games",
+        "/mnt/d/Downloads",
+        "/mnt/e",
+    ] {
+        let p = std::path::PathBuf::from(extra);
+        if p.is_dir() {
+            dirs.push(p);
+        }
+    }
+    dirs
 }
 
 /// Launch a helper app (e.g. the file manager) *beside* the shell: the shell

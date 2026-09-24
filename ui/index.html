@@ -1085,16 +1085,80 @@ function openRomPicker(game) {
   (game.rom_exts || []).forEach((e) => (romState.ext[e.toLowerCase()] = true));
   $("#rom-ov").classList.add("open");
   $("#rom-title").textContent = game.title;
-  // Default view = the games already set up for this emulator; the folder
-  // browser is the fallback when there are none yet.
+  // Open the desktop file manager on the console's folder so the user can
+  // pick a game there, and watch for games so anything they choose shows up
+  // here ready to play.
+  const dir = game.rom_dir || "";
+  // If this emulator already has games, show them right away and don't reopen
+  // the file manager — the user is picking from their library.
   post("roms:list", { id: game.id }).then((r) => {
     const games = (r && r.games) || [];
-    if (games.length) { renderRomLibrary(games); return; }
-    // No games yet: open the system file chooser straight away (the same
-    // dialog a browser shows for "upload file") to pick the first game.
-    chooseRomFile(game);
+    if (games.length) { startRomWatch(); renderRomLibrary(games); return; }
+    if (dir) post("files:reveal", { path: dir });
+    startRomWatch();
+    $("#rom-list").innerHTML = '<div class="rom-empty">Looking for games…</div>';
+    $("#rom-path").textContent = dir;
+    $("#rom-hint").textContent = "Choose a game in the file manager, or press Enter on one below to copy it into " + (dir || "the console folder") + " and play.";
   });
   sfx.ok();
+}
+
+// Poll the shell for game files (console folder, Desktop, Downloads, Windows
+// drives) while the picker is open, so a game chosen in the file manager
+// appears here within a couple of seconds.
+function startRomWatch() {
+  stopRomWatch();
+  const game = romState.game;
+  if (!game) return;
+  const scan = () => {
+    if (!romOpen() || romState.game !== game) return;
+    post("roms:scan", { id: game.id }).then((r) => {
+      if (!r || !r.ok || romState.game !== game) return;
+      const games = (r.games || []).filter((g) => g.known || romState.ext[(g.name.split(".").pop() || "").toLowerCase()]);
+      const sig = games.map((g) => g.path).join("|");
+      if (sig && sig !== romState.sig) {
+        const isFirstScan = !romState.sig;
+        romState.sig = sig;
+        renderFoundGames(games, isFirstScan);
+      }
+    });
+  };
+  scan();
+  romWatch = setInterval(scan, 3000);
+}
+function stopRomWatch() {
+  if (romWatch) { clearInterval(romWatch); romWatch = null; }
+}
+
+// Games discovered on disk: each is one click to copy into the console folder
+// and boot.
+function renderFoundGames(games, announce) {
+  const box = $("#rom-list");
+  if (!games.length) {
+    box.innerHTML = '<div class="rom-empty">No game files found yet.</div>' +
+      '<div class="rom-item" data-x="0" data-y="0" data-action="rom-browse">' +
+      ic("folder") + '<span class="nm">Browse folders…</span><span class="kind">BROWSE</span></div>' +
+      '<div class="rom-item" data-x="0" data-y="1" data-action="rom-choose">' +
+      ic("folder") + '<span class="nm">Select a game file…</span><span class="kind">SELECT</span></div>';
+    const f0 = box.querySelector("[data-x][data-y]");
+    if (f0) { indexFocus(box); focus(f0); }
+    return;
+  }
+  const rows = [];
+  games.forEach((g) => {
+    const label = g.name + (g.known ? "  •  in your library" : "");
+    rows.push(romItem(label, g.path, false, true, rows.length, g.known ? "SAVED" : "PLAY"));
+  });
+  rows.push(
+    '<div class="rom-item" data-x="0" data-y="' + rows.length + '" data-action="rom-choose">' +
+      ic("folder") + '<span class="nm">Select a game file…</span><span class="kind">SELECT</span></div>'
+  );
+  box.innerHTML = rows.join("");
+  $("#rom-path").textContent = games.length + " game" + (games.length === 1 ? "" : "s") + " found";
+  $("#rom-hint").textContent = "Pick a game to copy it into " + ((romState.game && romState.game.rom_dir) || "the console folder") + " and play it with " + (romState.game.title || "the emulator") + ".";
+  const first = box.querySelector("[data-x][data-y]");
+  if (first) { indexFocus(box); focus(first); }
+  if (announce && games.length) toast("Found " + games[0].name + " — press Enter to play", "ok");
 }
 
 // Ask the shell to show the native GTK file chooser for this emulator.
