@@ -48,8 +48,11 @@ pub fn configure_graphics_backend() {
     }
     // WSLg is up whenever /mnt/wslg is mounted; some shells/services do not
     // export DISPLAY even though the socket exists.
-    if std::env::var_os("DISPLAY").is_none() && std::path::Path::new("/mnt/wslg").exists() {
-        std::env::set_var("DISPLAY", ":0");
+    if std::env::var_os("DISPLAY").is_none() {
+        let x0 = std::path::Path::new("/tmp/.X11-unix/X0");
+        if std::path::Path::new("/mnt/wslg").exists() || x0.exists() {
+            std::env::set_var("DISPLAY", ":0");
+        }
     }
     eprintln!("NovaShell: WSL detected — using X11 + software rendering fallback");
     for (key, value) in [
@@ -232,6 +235,12 @@ struct AppState {
 
 pub fn run(opts: RunOptions) -> Result<()> {
     configure_graphics_backend();
+    eprintln!(
+        "NovaShell: DISPLAY={:?} wslg={} x11sock={}",
+        std::env::var_os("DISPLAY"),
+        std::path::Path::new("/mnt/wslg").exists(),
+        std::path::Path::new("/tmp/.X11-unix/X0").exists()
+    );
     init_logging(opts.debug);
     install_panic_hook();
     util::ensure_dirs().context("creating data directories")?;
@@ -241,9 +250,11 @@ pub fn run(opts: RunOptions) -> Result<()> {
         return Ok(());
     }
 
-    gtk::init().map_err(|e| anyhow!("GTK init failed: {e}"))?;
+    gtk::init().map_err(|e| anyhow!("GTK init failed (is a display available?): {e}"))?;
+    eprintln!("NovaShell: gtk init ok");
     let main_loop = glib::MainLoop::new(None, false);
     activate(&main_loop, &opts)?;
+    eprintln!("NovaShell: window presented, entering main loop");
     main_loop.run();
     Ok(())
 }
