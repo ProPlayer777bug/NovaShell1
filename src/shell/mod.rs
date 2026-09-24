@@ -95,6 +95,16 @@ pub fn configure_graphics_backend() {
     }
     for (key, value) in [
         ("GDK_BACKEND", "x11"),
+        // WSLg has no session bus/type, and GNOME apps (Nautilus) refuse to
+        // start without these: "Failed to initialize display server connection:
+        // Unsupported or missing session type ''".
+        ("XDG_SESSION_TYPE", "x11"),
+        ("XDG_SESSION_CLASS", "x11"),
+        ("XDG_CURRENT_DESKTOP", "GNOME"),
+        // No dconf/dbus in this session: keep settings in-process so apps
+        // don't stall on a settings bus that never answers.
+        ("GSETTINGS_BACKEND", "memory"),
+        ("NO_AT_BRIDGE", "1"),
         ("GSK_RENDERER", "cairo"),
         ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
         ("WEBKIT_FORCE_SANDBOX", "0"),
