@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use webkit6::prelude::*;
 
 use crate::controllers::Action;
-use crate::games::{format_playtime, Game, Library};
+use crate::games::{format_playtime, Game, Launch, Library};
 use crate::launcher::Spec;
 use crate::settings::Config;
 use crate::system::{self, ControllerInfo, CpuSampler};
@@ -28,6 +28,27 @@ pub struct RunOptions {
     pub debug: bool,
     pub watchdog: bool,
     pub help: bool,
+}
+
+/// Normalise `$HOME` so the data dirs (library, config, logs) are the same
+/// no matter how the shell is launched. `wsl -u root -c` exports a mangled
+/// `HOME=C:Usersdell`, which would split the library between two directories.
+fn normalize_home() {
+    let Some(h) = std::env::var_os("HOME") else {
+        return;
+    };
+    let hs = h.to_string_lossy();
+    if hs.starts_with('/') {
+        return;
+    }
+    let whoami = util::user_name();
+    let home = if whoami.is_empty() || whoami == "root" {
+        "/root".to_string()
+    } else {
+        format!("/home/{whoami}")
+    };
+    std::env::set_var("HOME", &home);
+    eprintln!("NovaShell: HOME was '{hs}'; normalized to {home}");
 }
 
 /// Choose the graphics backend *before* GTK/WebKit initialize.
@@ -234,6 +255,7 @@ struct AppState {
 }
 
 pub fn run(opts: RunOptions) -> Result<()> {
+    normalize_home();
     configure_graphics_backend();
     eprintln!(
         "NovaShell: DISPLAY={:?} wslg={} x11sock={}",
@@ -351,6 +373,23 @@ fn activate(main_loop: &glib::MainLoop, opts: &RunOptions) -> Result<()> {
         window.set_default_size(w, h);
     }
 window.present();
+    // Under WSLg the surface does not always get keyboard focus on map;
+    // force it onto the WebView right away and re-assert it for a few
+    // seconds in case the compositor hands focus back to the terminal.
+    webview.grab_focus();
+    {
+        let wv = webview.clone();
+        let mut rounds = 0u32;
+        glib::timeout_add_local(Duration::from_millis(300), move || {
+            rounds += 1;
+            wv.grab_focus();
+            if rounds >= 12 {
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+    }
     {
         let close_loop = main_loop.clone();
         window.connect_close_request(move |_win| {
@@ -494,6 +533,55 @@ fn route(state: &AppState, msg: Value) {
             let game_id = msg["id"].as_str().unwrap_or("");
             let rom = msg["rom"].as_str();
             launch_by_id(state, game_id, rom, id);
+        }
+
+        "game:install" => {
+            let game_id = msg["id"].as_str().unwrap_or("").to_string();
+            let reply_id = id.to_string();
+            let title = state
+                .library
+                .borrow()
+                .get(&game_id)
+                .map(|g| g.title.clone())
+                .unwrap_or_default();
+            let pkgs: Option<Vec<String>> = state.library.borrow().get(&game_id).and_then(|g| {
+                match &g.launch {
+                    Launch::Program { program, .. } => integrations::apps::apt_packages_for_program(program)
+                        .map(|p| p.iter().map(|s| s.to_string()).collect()),
+                    _ => None,
+                }
+            });
+            match pkgs {
+                Some(p) if !p.is_empty() => {
+                    reply(state, &reply_id, json!({ "ok": true, "status": "installing" }));
+                    let tx = state.sender.clone();
+                    std::thread::Builder::new()
+                        .name("novashell-install".into())
+                        .spawn(move || {
+                            let result = run_apt_install(&p);
+                            let msg = json!({
+                                "event": "_install_done",
+                                "ok": result.is_ok(),
+                                "error": result
+                                    .as_ref()
+                                    .err()
+                                    .map(|e| e.to_string()),
+                                "title": title,
+                            })
+                            .to_string();
+                            let _ = tx.send(msg);
+                        })
+                        .ok();
+                }
+                _ => reply(
+                    state,
+                    &reply_id,
+                    json!({
+                        "ok": false,
+                        "error": "No package available — this one needs a third-party repo.",
+                    }),
+                ),
+            }
         }
 
         "app:launch" => {
@@ -810,6 +898,24 @@ fn launch_by_id(state: &AppState, game_id: &str, rom: Option<&str>, id: &str) {
     }
 }
 
+/// Spawn `apt-get install` for the curated package list. Runs on a worker
+/// thread; the UI is told via `_install_done` when it finishes.
+fn run_apt_install(pkgs: &[String]) -> Result<()> {
+    log::info!("installing via apt: {}", pkgs.join(" "));
+    let status = std::process::Command::new("apt-get")
+        .args(["install", "-y", "--no-install-recommends"])
+        .args(pkgs)
+        .env("DEBIAN_FRONTEND", "noninteractive")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .status();
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(anyhow!("apt-get exited with {}", s.code().unwrap_or(-1))),
+        Err(e) => Err(anyhow!("could not run apt-get: {e}")),
+    }
+}
+
 /// Spawn a process, hide the shell while it's fullscreen, and report back.
 fn launch_spec(state: &AppState, spec: &Spec, library_id: Option<&str>) -> Result<()> {
     log::info!("launching: {}", spec.name);
@@ -851,6 +957,14 @@ fn launch_spec(state: &AppState, spec: &Spec, library_id: Option<&str>) -> Resul
 
 fn handle_core_event(state: &AppState, v: &Value) {
     // Internal side effects first.
+    if v.get("_internal").and_then(|x| x.as_bool()).unwrap_or(false)
+        && v["event"].as_str() == Some("_install_done")
+    {
+        if v["ok"].as_bool().unwrap_or(false) {
+            log::info!("install finished; refreshing library");
+            refresh_library(state);
+        }
+    }
     if v.get("_internal").and_then(|x| x.as_bool()).unwrap_or(false)
         && v["event"].as_str() == Some("game_exit")
     {

@@ -471,6 +471,10 @@
         <div id="hero-card"></div>
         <div id="home-actions"></div>
       </div>
+      <div id="home-all">
+        <div class="section-title" id="all-title">All apps</div>
+        <div class="grid wide" id="all-grid"></div>
+      </div>
       <div id="home-recent">
         <div class="section-title">Recently played</div>
         <div class="grid wide" id="recent-grid"></div>
@@ -657,6 +661,14 @@ function handleEvent(msg) {
     case "library_changed":
       refreshLibrary(true, false);
       break;
+    case "_install_done":
+      if (msg.ok) {
+        toast((msg.title || "App") + " installed", "ok");
+        refreshLibrary(true, false);
+      } else {
+        toast("Install failed: " + (msg.error || "unknown"), "warn");
+      }
+      break;
   }
 }
 
@@ -811,11 +823,18 @@ function runAction(action, el) {
 function launchGame(id) {
   const game = state.library.find((g) => g.id === id);
   if (!game) return;
-  if (game.installed === false) { toast(game.title + " is not installed", "warn"); return; }
+  if (game.installed === false) { installGame(game); return; }
   if (game.source === "emulator") { openRomPicker(game); return; }
   toast("Launching " + game.title + " …");
   post("game:launch", { id }).then((r) => {
     if (r && r.ok === false) toast(r.error || "Failed to launch", "warn");
+  });
+}
+
+function installGame(game) {
+  toast("Installing " + game.title + " …");
+  post("game:install", { id: game.id }).then((r) => {
+    if (r && r.ok === false) toast(r.error || "No install path", "warn");
   });
 }
 
@@ -1253,9 +1272,13 @@ function renderHome() {
   hero.innerHTML = heroGame
     ? '<div class="glow"></div><div class="content"><div class="eyebrow">' + (heroGame.last_played ? "Recently played" : "Featured") + "</div>" +
       '<div class="big">' + esc(heroGame.title) + "</div>" +
-      '<button class="btn play" data-x="0" data-y="1" data-action="launch" data-gid="' + heroGame.id + '">Play ' + ic("rocket") + "</button>" +
+      '<button class="btn play" data-x="0" data-y="1" data-action="launch" data-gid="' + heroGame.id + '">' + (heroGame.installed ? "Play " : "Install ") + ic("rocket") + "</button>" +
       '<button class="btn ghost" data-x="1" data-y="1" data-action="toggle-fav" data-gid="' + heroGame.id + '">' + (heroGame.favorite ? "★" : "☆") + " Favorite</button></div>"
     : '<div class="glow"></div><div class="content"><div class="eyebrow">Welcome to</div><div class="big">NovaShell</div><p style="color:var(--text-dim)">No games yet — add your launchers in Settings.</p></div>';
+
+  const allBox = $("#all-grid");
+  $("#all-title").textContent = games.length ? "All apps (" + games.length + ")" : "All apps";
+  allBox.innerHTML = games.slice(0, 12).map((g, i) => gameCard(g, i, 0)).join("");
 
   const actions = $("#home-actions");
   actions.innerHTML = [

@@ -30,6 +30,7 @@ pub const CURATED_BINS: &[&str] = &[
     "duckstation",
     "epsxe",
     "pcsx2",
+    "pcsx2-qt",
     "rpcs3",
     "xemu",
     "xenia",
@@ -97,7 +98,7 @@ const EMULATORS: &[EmulatorDef] = &[
         platform: "PS2",
         pretty: "PlayStation 2",
         icon: "PCSX2",
-        bins: &["pcsx2"],
+        bins: &["pcsx2-qt", "pcsx2"],
         exts: &["iso", "chd", "cso", "bin", "img", "gz"],
     },
     EmulatorDef {
@@ -246,6 +247,47 @@ pub fn is_curated_bin(program: &str) -> bool {
         .any(|b| prog == *b || name == *b || prog.ends_with(&format!("/{b}")))
 }
 
+/// Ubuntu/Debian package names used to install a curated tile, keyed by its
+/// binary name. An empty list means there is no first-class package (the app
+/// needs a third-party repo), so the tile reports "no install path".
+pub fn apt_packages_for_program(program: &str) -> Option<&'static [&'static str]> {
+    let key = PathBuf::from(program)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let map: &[(&str, &[&str])] = &[
+        // Ubuntu >= 23.10 ships firefox/chromium as snap-only transitional
+        // packages that hang without a working snapd, so no apt install here.
+        ("firefox", &[]),
+        ("firefox-esr", &[]),
+        ("chromium", &[]),
+        ("chromium-browser", &[]),
+        ("google-chrome", &[]),
+        ("google-chrome-stable", &[]),
+        ("brave-browser", &[]),
+        ("nautilus", &["nautilus"]),
+        ("nemo", &["nemo"]),
+        ("thunar", &["thunar"]),
+        ("pcmanfm", &["pcmanfm"]),
+        ("dolphin", &["dolphin"]),
+        ("pcsx2", &["pcsx2"]),
+        ("pcsx2-qt", &["pcsx2"]),
+        ("duckstation", &[]),
+        ("epsxe", &[]),
+        ("rpcs3", &[]),
+        ("xemu", &[]),
+        ("xenia", &[]),
+        ("dolphin-emu", &["dolphin-emu"]),
+        ("retroarch", &["retroarch"]),
+        ("mupen64plus", &["mupen64plus"]),
+        ("melonDS", &["melonds"]),
+        ("citra", &[]),
+        ("yuzu", &[]),
+        ("cemu", &[]),
+    ];
+    map.iter().find(|(k, _)| *k == key).map(|(_, pkgs)| *pkgs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +305,17 @@ mod tests {
         assert!(is_curated_bin("firefox"));
         assert!(is_curated_bin("/usr/bin/pcsx2"));
         assert!(is_curated_bin("xdg-desktop-portal-gtk") == false);
+    }
+
+    #[test]
+    fn apt_package_lookup() {
+        assert_eq!(apt_packages_for_program("nautilus"), Some(&["nautilus"][..]));
+        assert_eq!(apt_packages_for_program("pcsx2"), Some(&["pcsx2"][..]));
+        assert_eq!(apt_packages_for_program("pcsx2-qt"), Some(&["pcsx2"][..]));
+        assert_eq!(apt_packages_for_program("dolphin-emu"), Some(&["dolphin-emu"][..]));
+        assert_eq!(apt_packages_for_program("retroarch"), Some(&["retroarch"][..]));
+        assert_eq!(apt_packages_for_program("/usr/bin/firefox"), Some(&[][..]));
+        assert_eq!(apt_packages_for_program("brave-browser"), Some(&[][..]));
     }
 
     #[test]
