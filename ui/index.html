@@ -806,6 +806,7 @@ function runAction(action, el) {
     case "rom-file":
     case "rom-browse":
     case "rom-choose":
+    case "rom-files":
       romEnter(el);
       break;
     case "rom-close":
@@ -1083,51 +1084,34 @@ function openRomPicker(game) {
   romState.ext = {};
   romState.sig = "";
   (game.rom_exts || []).forEach((e) => (romState.ext[e.toLowerCase()] = true));
-  $("#rom-ov").classList.add("open");
-  $("#rom-title").textContent = game.title;
-  // Open the desktop file manager on the console's folder so the user can
-  // pick a game there, and watch for games so anything they choose shows up
-  // here ready to play.
-  const dir = game.rom_dir || "";
-  // If this emulator already has games, show them right away and don't reopen
-  // the file manager — the user is picking from their library.
+  // Already have games for this console? Show them; otherwise hand over to the
+  // real Files window, where the game is chosen and opened.
   post("roms:list", { id: game.id }).then((r) => {
     const games = (r && r.games) || [];
-    if (games.length) { startRomWatch(); renderRomLibrary(games); return; }
-    if (dir) post("files:reveal", { path: dir });
-    startRomWatch();
-    $("#rom-list").innerHTML = '<div class="rom-empty">Looking for games…</div>';
-    $("#rom-path").textContent = dir;
-    $("#rom-hint").textContent = "Choose a game in the file manager, or press Enter on one below to copy it into " + (dir || "the console folder") + " and play.";
+    if (games.length) { openRomBrowser(game, games); return; }
+    toast("Choose your game in the Files window");
+    post("roms:pick", { id: game.id });
   });
   sfx.ok();
 }
 
-// Poll the shell for game files (console folder, Desktop, Downloads, Windows
-// drives) while the picker is open, so a game chosen in the file manager
-// appears here within a couple of seconds.
-function startRomWatch() {
-  stopRomWatch();
-  const game = romState.game;
-  if (!game) return;
-  const scan = () => {
-    if (!romOpen() || romState.game !== game) return;
-    post("roms:scan", { id: game.id }).then((r) => {
-      if (!r || !r.ok || romState.game !== game) return;
-      const games = (r.games || []).filter((g) => g.known || romState.ext[(g.name.split(".").pop() || "").toLowerCase()]);
-      const sig = games.map((g) => g.path).join("|");
-      if (sig && sig !== romState.sig) {
-        const isFirstScan = !romState.sig;
-        romState.sig = sig;
-        renderFoundGames(games, isFirstScan);
-      }
-    });
-  };
-  scan();
-  romWatch = setInterval(scan, 3000);
-}
+// The Rust side watches for a game opened in the file manager (see the
+// `roms:pick` route), so nothing needs to poll from here.
 function stopRomWatch() {
   if (romWatch) { clearInterval(romWatch); romWatch = null; }
+}
+
+// Manual in-shell picker, used by the saved-games list and Browse action.
+function openRomBrowser(game, saved) {
+  romState.game = game;
+  romState.ext = {};
+  romState.sig = "";
+  (game.rom_exts || []).forEach((e) => (romState.ext[e.toLowerCase()] = true));
+  $("#rom-ov").classList.add("open");
+  $("#rom-title").textContent = game.title;
+  if (saved && saved.length) { renderRomLibrary(saved); return; }
+  romGo((game.rom_dir) || "");
+  sfx.ok();
 }
 
 // Games discovered on disk: each is one click to copy into the console folder
@@ -1190,12 +1174,8 @@ function renderRomLibrary(games) {
     rows.push(romItem(name, p, false, true, rows.length, "GAME"));
   });
   rows.push(
-    '<div class="rom-item" data-x="0" data-y="' + rows.length + '" data-action="rom-choose">' +
-      ic("folder") + '<span class="nm">Choose another game file…</span><span class="kind">SELECT</span></div>'
-  );
-  rows.push(
-    '<div class="rom-item" data-x="0" data-y="' + rows.length + '" data-action="rom-browse">' +
-      ic("folder") + '<span class="nm">Browse for more games…</span><span class="kind">BROWSE</span></div>'
+    '<div class="rom-item" data-x="0" data-y="' + rows.length + '" data-action="rom-files">' +
+      ic("folder") + '<span class="nm">Open Files to pick another game…</span><span class="kind">FILES</span></div>'
   );
   box.innerHTML = rows.join("");
   $("#rom-path").textContent = games.length + " game" + (games.length === 1 ? "" : "s") + " saved";
@@ -1263,7 +1243,8 @@ function romEnter(el) {
   if (action === "rom-dir") romGo(path);
   else if (action === "rom-file") launchRom(el, path);
   else if (action === "rom-choose") chooseRomFile(romState.game);
-  else if (action === "rom-browse") romGo((romState.game && romState.game.rom_dir) || "");
+  else if (action === "rom-files") { closeRomPicker(); post("roms:pick", { id: romState.game && romState.game.id }); }
+  else if (action === "rom-browse") openRomBrowser(romState.game);
 }
 
 function launchRom(el, path) {

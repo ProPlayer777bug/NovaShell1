@@ -730,6 +730,77 @@ fn route(state: &AppState, msg: Value) {
             }
         }
 
+        // Pick a game in the real Files window: open it on the console folder,
+        // hide the shell so Files is the visible/focused window, and watch for
+        // the user opening a game file. Everything is done on a worker thread
+        // because the shell window is hidden (and its JS timers throttled)
+        // while the file manager is up.
+        "roms:pick" => {
+            let game_id = msg["id"].as_str().unwrap_or("").to_string();
+            let game = state.library.borrow().get(&game_id).cloned();
+            match game {
+                Some(g) => {
+                    let dir = console_rom_dir(&g)
+                        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
+                    let _ = std::fs::create_dir_all(&dir);
+                    if let Some(program) = integrations::apps::first_installed_file_manager() {
+                        let spec = Spec::new("Files", program)
+                            .arg(dir.to_string_lossy().to_string());
+                        let _ = spawn_background(&spec);
+                    }
+                    // Give the shell window away so the file manager is on top.
+                    state.window.set_visible(false);
+                    let sender = state.sender.clone();
+                    let exts = g.rom_exts.clone();
+                    std::thread::Builder::new()
+                        .name("novashell-romwatch".into())
+                        .spawn(move || {
+                            // Prime, then poll for a game the user opens.
+                            let _ = watch_opened_games(&exts, &game_id);
+                            for _ in 0..150 {
+                                std::thread::sleep(Duration::from_secs(2));
+                                if let Some(found) =
+                                    watch_opened_games(&exts, &game_id).pop()
+                                {
+                                    if let Some(path) = found["path"].as_str() {
+                                        let msg = json!({
+                                            "event": "_rom_opened",
+                                            "id": game_id,
+                                            "path": path,
+                                            "_internal": true,
+                                        })
+                                        .to_string();
+                                        let _ = sender.send(msg);
+                                        return;
+                                    }
+                                }
+                            }
+                            let _ = sender.send(
+                                json!({ "event": "_rom_pick_timeout", "_internal": true })
+                                    .to_string(),
+                            );
+                        })
+                        .ok();
+                    reply(state, id, json!({ "ok": true }));
+                }
+                None => reply(state, id, json!({ "ok": false, "error": "game not found" })),
+            }
+        }
+
+        // Report a game file the user just opened in the file manager, so the
+        // shell can copy it into the console folder and boot it.
+        "roms:watch" => {
+            let game_id = msg["id"].as_str().unwrap_or("").to_string();
+            let exts = state
+                .library
+                .borrow()
+                .get(&game_id)
+                .map(|g| g.rom_exts.clone())
+                .unwrap_or_default();
+            let opened = watch_opened_games(&exts, &game_id);
+            reply(state, id, json!({ "ok": true, "opened": opened }));
+        }
+
         // Look for game files matching this console's extensions in the usual
         // places, so a game the user opened/copied in the file manager shows
         // up as "Play" without hunting for it.
@@ -1362,13 +1433,104 @@ fn game_search_dirs() -> Vec<std::path::PathBuf> {
     dirs
 }
 
+/// Watch the game folders and report a game file the user has just *opened* in
+/// the file manager. Nautilus cannot hand a selection back to us, so we notice
+/// by access time: selecting/opening a file reads it, which updates its atime
+/// on the filesystems we care about. A first call primes the snapshot and
+/// arms the watch; later calls report anything opened since.
+fn watch_opened_games(exts: &[String], game_id: &str) -> Vec<Value> {
+    let exts: Vec<String> = exts.iter().map(|e| e.to_lowercase()).collect();
+    let mut snapshot: std::collections::HashMap<String, std::time::SystemTime> =
+        Default::default();
+    let mut all: Vec<Value> = Vec::new();
+
+    for dir in game_search_dirs() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            let ext = p
+                .extension()
+                .map(|x| x.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            if !exts.contains(&ext) {
+                continue;
+            }
+            let path = p.to_string_lossy().to_string();
+            let Ok(meta) = e.metadata() else { continue };
+            let accessed = meta.accessed().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            snapshot.insert(path.clone(), accessed);
+            all.push(json!({
+                "name": p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                "path": path,
+                "size": meta.len(),
+            }));
+        }
+    }
+
+    // Compare against the previous snapshot for this console.
+    let store = rom_watch_store();
+    let mut guard = store.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.get(game_id) {
+        None => {
+            // First call: remember the current state, report nothing yet.
+            guard.insert(game_id.to_string(), snapshot);
+            return Vec::new();
+        }
+        Some(previous) => {
+            let mut result = Vec::new();
+            for (path, atime) in &snapshot {
+                match previous.get(path) {
+                    Some(before) if before >= atime => {}
+                    _ => {
+                        if let Some(item) = all.iter().find(|v| v["path"] == path.as_str()) {
+                            result.push(item.clone());
+                        }
+                    }
+                }
+            }
+            guard.insert(game_id.to_string(), snapshot);
+            return result;
+        }
+    }
+}
+
+/// Process-wide map of console id -> last seen file access times.
+fn rom_watch_store() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, std::collections::HashMap<String, std::time::SystemTime>>,
+> {
+    use std::sync::OnceLock;
+    static STORE: OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<String, std::collections::HashMap<String, std::time::SystemTime>>,
+        >,
+    > = OnceLock::new();
+    STORE.get_or_init(|| std::sync::Mutex::new(Default::default()))
+}
+
 /// Launch a helper app (e.g. the file manager) *beside* the shell: the shell
 /// window stays visible, no "now playing" state, and quitting the shell does
 /// not take the helper down (it is the user's own file manager window).
 fn spawn_background(spec: &Spec) -> Result<()> {
     log::info!("opening helper: {} ({})", spec.name, spec.program);
     let mut child = crate::launcher::spawn(spec)?;
+    // A freshly mapped window can land behind the shell under WSLg, which
+    // looks like "nothing opened". Raise it once it is on screen.
+    let program = std::path::Path::new(&spec.program)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1800));
+        let _ = std::process::Command::new("xdotool")
+            .args(["search", "--class", &program, "windowactivate", "--sync"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
         let _ = child.wait();
     });
     Ok(())
@@ -1441,6 +1603,22 @@ fn launch_spec(state: &AppState, spec: &Spec, library_id: Option<&str>) -> Resul
 
 fn handle_core_event(state: &AppState, v: &Value) {
     // Internal side effects first.
+    if v.get("_internal").and_then(|x| x.as_bool()).unwrap_or(false)
+        && v["event"].as_str() == Some("_rom_opened")
+    {
+        // The user opened a game in the file manager: copy it into the console
+        // folder, remember it and boot the emulator.
+        let gid = v["id"].as_str().unwrap_or_default().to_string();
+        let path = v["path"].as_str().unwrap_or_default().to_string();
+        state.window.set_visible(true);
+        launch_by_id(state, &gid, Some(&path), "");
+    }
+    if v.get("_internal").and_then(|x| x.as_bool()).unwrap_or(false)
+        && v["event"].as_str() == Some("_rom_pick_timeout")
+    {
+        // Nothing was chosen in the file manager: bring the shell back.
+        show_shell(state);
+    }
     if v.get("_internal").and_then(|x| x.as_bool()).unwrap_or(false)
         && v["event"].as_str() == Some("_launch_hide")
     {
