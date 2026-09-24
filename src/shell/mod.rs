@@ -886,6 +886,12 @@ fn launch_by_id(state: &AppState, game_id: &str, rom: Option<&str>, id: &str) {
             return;
         }
     };
+    let flags = console_polish(&spec.program);
+    if !flags.is_empty() {
+        let mut all = flags;
+        all.extend(spec.args.clone());
+        spec.args = all;
+    }
     if let Some(rom) = rom {
         if !rom.is_empty() {
             if !std::path::Path::new(rom).exists() {
@@ -929,6 +935,42 @@ fn run_apt_install(pkgs: &[String]) -> Result<()> {
 }
 
 /// Spawn a process, hide the shell while it's fullscreen, and report back.
+/// Console-style launch flags, keyed by binary name. Emulators get forced
+/// fullscreen so they take the whole screen like a console app; browsers get
+/// a dedicated fullscreen window on a fresh profile so launching them never
+/// just drops a tab into an already-running instance.
+fn console_polish(program: &str) -> Vec<String> {
+    use std::path::Path;
+    let bin = Path::new(program)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| program.to_string());
+    let fs_profile = |name: &str| {
+        let dir = crate::util::data_dir()
+            .join("browsers")
+            .join(format!("{name}-profile"))
+            .to_string_lossy()
+            .to_string();
+        vec![
+            "--new-window".into(),
+            "--start-fullscreen".into(),
+            "--no-first-run".into(),
+            "--no-default-browser-check".into(),
+            format!("--user-data-dir={dir}"),
+        ]
+    };
+    match bin.as_str() {
+        "brave-browser" | "brave-browser-stable" | "brave" => fs_profile("brave"),
+        "google-chrome" | "google-chrome-stable" | "chromium" | "chromium-browser" => {
+            fs_profile("chrome")
+        }
+        "retroarch" => vec!["-f".into()],
+        "dolphin-emu" | "dolphin" => vec!["-f".into()],
+        "pcsx2" | "pcsx2-qt" => vec!["--fullscreen".into()],
+        _ => vec![],
+    }
+}
+
 fn launch_spec(state: &AppState, spec: &Spec, library_id: Option<&str>) -> Result<()> {
     log::info!("launching: {}", spec.name);
     let child = crate::launcher::spawn(spec)?;
