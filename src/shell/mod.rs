@@ -269,6 +269,9 @@ fn activate(main_loop: &glib::MainLoop, opts: &RunOptions) -> Result<()> {
     }
 
     let ucm = webkit6::UserContentManager::new();
+    if !ucm.register_script_message_handler(ui::namespace(), None) {
+        log::warn!("could not register script message handler '{}'", ui::namespace());
+    }
     let state_slot: Rc<RefCell<Option<AppState>>> = Rc::new(RefCell::new(None));
 
     // JS -> Rust messages land here.
@@ -291,6 +294,9 @@ fn activate(main_loop: &glib::MainLoop, opts: &RunOptions) -> Result<()> {
         .user_content_manager(&ucm)
         .build();
     webview.set_background_color(&gtk::gdk::RGBA::new(0.016, 0.02, 0.04, 1.0));
+    if let Some(settings) = webkit6::prelude::WebViewExt::settings(&webview) {
+        settings.set_enable_write_console_messages_to_stdout(true);
+    }
     if opts.debug {
         if let Some(settings) = webkit6::prelude::WebViewExt::settings(&webview) {
             settings.set_enable_developer_extras(true);

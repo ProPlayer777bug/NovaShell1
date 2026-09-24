@@ -1280,7 +1280,7 @@ function act(x, y, action, icon, label, hint) {
 /* ------------------------------ Library ------------------------------ */
 function renderLibrary(keepFocus) {
   const box = $("#lib-grid");
-  const filters = { all: true, favorites: (g) => g.favorite, steam: (g) => g.source === "steam", heroic: (g) => g.source === "heroic", desktop: (g) => g.source === "desktop", apps: (g) => g.source === "app", emulators: (g) => g.source === "emulator", manual: (g) => g.source === "manual" };
+  const filters = { all: () => true, favorites: (g) => g.favorite, steam: (g) => g.source === "steam", heroic: (g) => g.source === "heroic", desktop: (g) => g.source === "desktop", apps: (g) => g.source === "app", emulators: (g) => g.source === "emulator", manual: (g) => g.source === "manual" };
   const f = filters[state.filter] || filters.all;
   const list = state.library.filter(f);
   $("#lib-count").textContent = list.length + " of " + state.library.length;
