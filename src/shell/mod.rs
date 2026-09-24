@@ -696,6 +696,40 @@ fn route(state: &AppState, msg: Value) {
             }
         }
 
+        // Native file chooser for a game file — the same dialog a browser
+        // shows for "upload file". The chosen path comes back to the UI as
+        // `_rom_chosen`, which then boots the emulator with it.
+        "roms:choose" => {
+            let game_id = msg["id"].as_str().unwrap_or("").to_string();
+            match state.library.borrow().get(&game_id) {
+                Some(g) => {
+                    let title = g.title.clone();
+                    let exts = g.rom_exts.clone();
+                    let folder = g
+                        .rom_dir
+                        .as_ref()
+                        .map(|d| dirs::home_dir().unwrap_or_default().join(d));
+                    if let Some(f) = &folder {
+                        let _ = std::fs::create_dir_all(f);
+                    }
+                    let sender = state.sender.clone();
+                    open_rom_chooser(&state.window, &title, &exts, folder, move |chosen| {
+                        let payload = match chosen {
+                            Some(path) => json!({
+                                "event": "_rom_chosen",
+                                "id": game_id,
+                                "path": path,
+                            }),
+                            None => json!({ "event": "_rom_cancelled" }),
+                        };
+                        let _ = sender.send(payload.to_string());
+                    });
+                    reply(state, id, json!({ "ok": true }));
+                }
+                None => reply(state, id, json!({ "ok": false, "error": "game not found" })),
+            }
+        }
+
         "files:list" => {
             let path = msg["path"].as_str().unwrap_or("").to_string();
             let out = list_folder(&path);
@@ -1085,6 +1119,77 @@ fn run_apt_install(pkgs: &[String]) -> Result<()> {
 }
 
 /// Spawn a process, hide the shell while it's fullscreen, and report back.
+/// Open the native GTK file chooser for a game file. `on_done` receives the
+/// chosen path, or `None` when the dialog is cancelled. The dialog is kept
+/// alive in a thread-local until it closes, because dropping the last
+/// reference would close it immediately.
+#[allow(deprecated)]
+fn open_rom_chooser<F>(
+    parent: &gtk::Window,
+    title: &str,
+    exts: &[String],
+    folder: Option<std::path::PathBuf>,
+    on_done: F,
+) where
+    F: Fn(Option<String>) + 'static,
+{
+    use gtk::prelude::*;
+
+    // `FileChooserNative` is soft-deprecated in GTK 4.10 (GtkFileDialog is
+    // the replacement), but it renders the platform's native file picker,
+    // which is exactly the Chrome-style "upload file" dialog we want here.
+    thread_local! {
+        static OPEN_CHOOSERS: RefCell<Vec<gtk::FileChooserNative>> =
+            const { RefCell::new(Vec::new()) };
+    }
+
+    let dialog = gtk::FileChooserNative::builder()
+        .title(format!("Select a game file for {title}"))
+        .transient_for(parent)
+        .action(gtk::FileChooserAction::Open)
+        .accept_label("Play")
+        .cancel_label("Cancel")
+        .modal(true)
+        .build();
+
+    if let Some(dir) = folder {
+        let file = gtk::gio::File::for_path(dir);
+        let _ = dialog.set_current_folder(Some(&file));
+    }
+    if !exts.is_empty() {
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("Game files"));
+        for ext in exts {
+            filter.add_pattern(&format!("*.{ext}"));
+        }
+        let all = gtk::FileFilter::new();
+        all.set_name(Some("All files"));
+        all.add_pattern("*");
+        dialog.add_filter(&filter);
+        dialog.add_filter(&all);
+        dialog.set_filter(&filter);
+    }
+
+    let cb = on_done;
+    dialog.connect_response(move |d, response| {
+        let chosen = if response == gtk::ResponseType::Accept {
+            d.file()
+                .and_then(|f| f.path())
+                .map(|p| p.to_string_lossy().to_string())
+        } else {
+            None
+        };
+        OPEN_CHOOSERS.with(|c| {
+            c.borrow_mut().retain(|x| x != d);
+        });
+        d.destroy();
+        cb(chosen);
+    });
+
+    OPEN_CHOOSERS.with(|c| c.borrow_mut().push(dialog.clone()));
+    dialog.show();
+}
+
 /// Console-style launch flags, keyed by binary name. Emulators get forced
 /// fullscreen so they take the whole screen like a console app; browsers get
 /// a dedicated fullscreen window on a fresh profile so launching them never

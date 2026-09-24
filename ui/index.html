@@ -672,6 +672,19 @@ function handleEvent(msg) {
     case "_launch_failed":
       toast((msg.title || "That app") + " failed to start", "warn");
       break;
+    case "_rom_chosen": {
+      // A game file was picked in the system file chooser: boot it now.
+      const game = state.library.find((g) => g.id === msg.id);
+      stopRomWatch();
+      if (game) {
+        toast("Booting " + game.title + " with " + String(msg.path || "").split("/").pop());
+        post("game:launch", { id: game.id, rom: msg.path });
+      }
+      break;
+    }
+    case "_rom_cancelled":
+      stopRomWatch();
+      break;
   }
 }
 
@@ -778,7 +791,7 @@ function runAction(action, el) {
     case "rom-dir":
     case "rom-file":
     case "rom-browse":
-    case "rom-open-files":
+    case "rom-choose":
       romEnter(el);
       break;
     case "rom-close":
@@ -1051,15 +1064,19 @@ function openRomPicker(game) {
   // browser is the fallback when there are none yet.
   post("roms:list", { id: game.id }).then((r) => {
     const games = (r && r.games) || [];
-    startRomWatch();
     if (games.length) { renderRomLibrary(games); return; }
-    // First run for this console: open the file manager on the console's game
-    // folder so a game can be added, and browse the same folder in the picker.
-    const dir = game.rom_dir || "";
-    if (dir) post("files:reveal", { path: dir });
-    romGo(dir);
+    // No games yet: open the system file chooser straight away (the same
+    // dialog a browser shows for "upload file") to pick the first game.
+    chooseRomFile(game);
   });
   sfx.ok();
+}
+
+// Ask the shell to show the native GTK file chooser for this emulator.
+function chooseRomFile(game) {
+  if (!game) return;
+  toast("Select the game file for " + game.title);
+  post("roms:choose", { id: game.id });
 }
 function closeRomPicker() {
   stopRomWatch();
@@ -1084,12 +1101,12 @@ function renderRomLibrary(games) {
     rows.push(romItem(name, p, false, true, rows.length, "GAME"));
   });
   rows.push(
-    '<div class="rom-item" data-x="0" data-y="' + rows.length + '" data-action="rom-browse">' +
-      ic("folder") + '<span class="nm">Browse for more games…</span><span class="kind">BROWSE</span></div>'
+    '<div class="rom-item" data-x="0" data-y="' + rows.length + '" data-action="rom-choose">' +
+      ic("folder") + '<span class="nm">Choose another game file…</span><span class="kind">SELECT</span></div>'
   );
   rows.push(
-    '<div class="rom-item" data-x="0" data-y="' + rows.length + '" data-action="rom-open-files">' +
-      ic("folder") + '<span class="nm">Open Files to add a game…</span><span class="kind">FILES</span></div>'
+    '<div class="rom-item" data-x="0" data-y="' + rows.length + '" data-action="rom-browse">' +
+      ic("folder") + '<span class="nm">Browse for more games…</span><span class="kind">BROWSE</span></div>'
   );
   box.innerHTML = rows.join("");
   $("#rom-path").textContent = games.length + " game" + (games.length === 1 ? "" : "s") + " saved";
@@ -1123,8 +1140,8 @@ function renderRoms(r, done) {
   if (!show.length) {
     const exts = Object.keys(romState.ext).join(" / ");
     box.innerHTML = '<div class="rom-empty">No games in this folder yet.</div>' +
-      '<div class="rom-item" data-x="0" data-y="0" data-action="rom-open-files">' +
-      ic("folder") + '<span class="nm">Open Files here and add a game…</span><span class="kind">FILES</span></div>';
+      '<div class="rom-item" data-x="0" data-y="0" data-action="rom-choose">' +
+      ic("folder") + '<span class="nm">Select a game file…</span><span class="kind">SELECT</span></div>';
     $("#rom-path").textContent = folder.path;
     $("#rom-hint").textContent = "Put your game files here (accepted: " + (exts || "any file") + "), then pick one. Press Esc to go back.";
     const f = box.querySelector("[data-x][data-y]");
@@ -1133,8 +1150,8 @@ function renderRoms(r, done) {
   }
   show.forEach((e) => rows.push(romItem(e.name, e.path, e.is_dir, !e.is_dir, rows.length)));
   rows.push(
-    '<div class="rom-item" data-x="0" data-y="' + rows.length + '" data-action="rom-open-files">' +
-      ic("folder") + '<span class="nm">Open Files here to add a game…</span><span class="kind">FILES</span></div>'
+    '<div class="rom-item" data-x="0" data-y="' + rows.length + '" data-action="rom-choose">' +
+      ic("folder") + '<span class="nm">Select a game file…</span><span class="kind">SELECT</span></div>'
   );
   box.innerHTML = rows.join("");
   $("#rom-path").textContent = folder.path;
@@ -1156,11 +1173,8 @@ function romEnter(el) {
   const path = el.dataset.path;
   if (action === "rom-dir") romGo(path);
   else if (action === "rom-file") launchRom(el, path);
+  else if (action === "rom-choose") chooseRomFile(romState.game);
   else if (action === "rom-browse") romGo((romState.game && romState.game.rom_dir) || "");
-  else if (action === "rom-open-files") {
-    const target = el.dataset.path || romState.path || ((romState.game && romState.game.rom_dir) || "");
-    post("files:reveal", { path: target });
-  }
 }
 
 function launchRom(el, path) {
