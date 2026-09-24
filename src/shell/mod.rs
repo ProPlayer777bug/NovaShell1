@@ -325,14 +325,30 @@ fn activate(main_loop: &glib::MainLoop, opts: &RunOptions) -> Result<()> {
 
     let window = gtk::Window::builder()
         .title("NovaShell")
-        .default_width(1920)
-        .default_height(1080)
         .build();
     window.set_child(Some(&webview));
     if opts.fullscreen {
         window.fullscreen();
     } else {
-        window.maximize();
+        // Size to the connected monitor's area instead of a fixed 1920x1080:
+        // on WSLg displays smaller than that, a maximized window maps larger
+        // than the screen and only a taskbar stub is visible.
+        let (mut w, mut h) = (1280, 720);
+        if let Some(disp) = gtk::gdk::Display::default() {
+            use gtk::gdk::prelude::MonitorExt;
+            use gtk::gio::prelude::ListModelExt;
+            if let Some(mon) = disp
+                .monitors()
+                .item(0)
+                .and_then(|o| o.downcast::<gtk::gdk::Monitor>().ok())
+            {
+                let g = MonitorExt::geometry(&mon);
+                w = g.width();
+                h = g.height();
+            }
+        }
+        log::debug!("windowed size {w}x{h}");
+        window.set_default_size(w, h);
     }
 window.present();
     {
