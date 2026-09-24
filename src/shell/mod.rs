@@ -678,6 +678,47 @@ fn route(state: &AppState, msg: Value) {
             }
         }
 
+        // Games previously booted with an emulator, newest first.
+        "roms:list" => {
+            let emulator = msg["id"].as_str().unwrap_or("");
+            let lib = crate::roms::RomLibrary::load();
+            reply(state, id, json!({ "ok": true, "games": lib.games_for(emulator) }));
+        }
+
+        // Remember a game so the next launch of this emulator can offer it.
+        "roms:remember" => {
+            let emulator = msg["id"].as_str().unwrap_or("").to_string();
+            let path = msg["path"].as_str().unwrap_or("").to_string();
+            if emulator.is_empty() || path.is_empty() {
+                reply(state, id, json!({ "ok": false, "error": "missing id or path" }));
+            } else {
+                let mut lib = crate::roms::RomLibrary::load();
+                lib.remember(&emulator, &path);
+                reply(state, id, json!({ "ok": true }));
+            }
+        }
+
+        // Open the desktop file manager on a folder (used by the ROM picker
+        // so the user can copy game files in before selecting one).
+        "files:reveal" => {
+            let path = msg["path"].as_str().unwrap_or("");
+            let dir = if path.is_empty() {
+                std::path::PathBuf::from("/")
+            } else {
+                std::path::PathBuf::from(path)
+            };
+            let dir = if dir.is_dir() { dir } else {
+                dir.parent().map(|p| p.to_path_buf()).unwrap_or(dir)
+            };
+            let program = integrations::apps::first_installed_file_manager()
+                .unwrap_or_else(|| "nautilus".to_string());
+            let spec = Spec::new("Files", program).arg(dir.to_string_lossy().to_string());
+            match launch_spec(state, &spec, None) {
+                Ok(()) => reply(state, id, json!({ "ok": true })),
+                Err(e) => reply(state, id, json!({ "ok": false, "error": e.to_string() })),
+            }
+        }
+
         "settings:get" => reply(state, id, json!({ "config": state.config.borrow().clone() })),
         "settings:set" => settings_set(state, &msg),
 
@@ -881,11 +922,26 @@ fn settings_set(state: &AppState, msg: &Value) {
 /// List a directory for the UI's ROM/file browser. Defaults to the user's
 /// home dir when `path` is empty or missing.
 fn list_folder(path: &str) -> Result<Value> {
-    let start = if path.trim().is_empty() {
+    // "~/PS2" and a bare console folder name both resolve under the home dir,
+    // so the ROM picker can just ask for the tile's `rom_dir`.
+    let raw = path.trim();
+    let expanded = if raw == "~" || raw.starts_with("~/") {
+        util::expand_tilde(raw)
+    } else if !raw.is_empty() && !raw.starts_with('/') {
+        dirs::home_dir().unwrap_or_default().join(raw)
+    } else {
+        std::path::PathBuf::from(raw)
+    };
+    let start = if expanded.as_os_str().is_empty() {
         dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"))
     } else {
-        std::path::PathBuf::from(path.trim())
+        expanded
     };
+    // A console folder that does not exist yet is created on demand: it is the
+    // place the user is told to drop game files.
+    if !start.exists() && start.parent().map(|p| p.is_dir()).unwrap_or(false) {
+        let _ = std::fs::create_dir_all(&start);
+    }
     let start = start.canonicalize().map_err(|e| anyhow!("bad folder: {e}"))?;
     if !start.is_dir() {
         return Err(anyhow!("not a directory"));
@@ -963,6 +1019,9 @@ fn launch_by_id(state: &AppState, game_id: &str, rom: Option<&str>, id: &str) {
                 return;
             }
             spec = spec.arg(rom);
+            // Remember it so this emulator can list its games next time.
+            let mut lib = crate::roms::RomLibrary::load();
+            lib.remember(game_id, rom);
             log::info!("{} (rom: {rom})", game.title);
         }
     }

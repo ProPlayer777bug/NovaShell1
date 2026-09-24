@@ -205,6 +205,7 @@ pub fn scan_desktop_games(cfg: &Config) -> Vec<Game> {
                 installed: true,
                 platform: None,
                 rom_exts: Vec::new(),
+            rom_dir: None,
             });
         }
     }

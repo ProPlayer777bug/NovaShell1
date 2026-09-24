@@ -76,12 +76,22 @@ const FILE_MANAGERS: &[(&str, &str, &[&str])] = &[
     ("PCManFM", "pcmanfm", &["pcmanfm"]),
 ];
 
+/// The first file manager actually installed, for "open this folder" actions.
+pub fn first_installed_file_manager() -> Option<String> {
+    FILE_MANAGERS
+        .iter()
+        .find_map(|(_, bin, _)| find_bin(bin))
+}
+
 struct EmulatorDef {
     platform: &'static str,
     pretty: &'static str,
     icon: &'static str,
     bins: &'static [&'static str],
     exts: &'static [&'static str],
+    /// Folder under the user's home where this console's games are kept, and
+    /// the folder the ROM picker opens on the very first visit.
+    rom_dir: &'static str,
 }
 
 /// Per-console emulator definitions. Only one tile per console (first
@@ -93,6 +103,7 @@ const EMULATORS: &[EmulatorDef] = &[
         icon: "duckstation",
         bins: &["duckstation", "epsxe"],
         exts: &["cue", "bin", "iso", "chd", "pbp", "img", "m3u"],
+        rom_dir: "PSX",
     },
     EmulatorDef {
         platform: "PS2",
@@ -100,6 +111,7 @@ const EMULATORS: &[EmulatorDef] = &[
         icon: "PCSX2",
         bins: &["pcsx2-qt", "pcsx2"],
         exts: &["iso", "chd", "cso", "bin", "img", "gz"],
+        rom_dir: "PS2",
     },
     EmulatorDef {
         platform: "PS3",
@@ -107,6 +119,7 @@ const EMULATORS: &[EmulatorDef] = &[
         icon: "rpcs3",
         bins: &["rpcs3"],
         exts: &["pkg", "iso", "ps3dir"],
+        rom_dir: "PS3",
     },
     EmulatorDef {
         platform: "Xbox",
@@ -114,6 +127,7 @@ const EMULATORS: &[EmulatorDef] = &[
         icon: "xemu",
         bins: &["xemu", "xenia"],
         exts: &["iso", "xiso", "xbe", "xex"],
+        rom_dir: "Xbox",
     },
     EmulatorDef {
         platform: "Wii",
@@ -121,6 +135,7 @@ const EMULATORS: &[EmulatorDef] = &[
         icon: "dolphin-emu",
         bins: &["dolphin-emu"],
         exts: &["iso", "rvz", "gcm", "wbfs", "nkit", "wad", "dol"],
+        rom_dir: "Wii",
     },
     EmulatorDef {
         platform: "Nintendo",
@@ -131,6 +146,7 @@ const EMULATORS: &[EmulatorDef] = &[
             "nes", "fds", "snes", "sfc", "gb", "gbc", "gba", "nds", "n64", "z64",
             "3ds", "cia", "nsp", "xci",
         ],
+        rom_dir: "Nintendo",
     },
 ];
 
@@ -142,6 +158,7 @@ fn curated_app(
     platform: Option<&str>,
     rom_exts: Vec<String>,
     installed: bool,
+    rom_dir: Option<&str>,
 ) -> Game {
     let key = PathBuf::from(program)
         .file_name()
@@ -163,6 +180,7 @@ fn curated_app(
         installed,
         platform: platform.map(String::from),
         rom_exts,
+        rom_dir: rom_dir.map(String::from),
     }
 }
 
@@ -182,8 +200,8 @@ pub fn scan_curated_games(_cfg: &Config) -> Vec<Game> {
 
     for (title, icon, cands) in BROWSERS {
         match resolve_bin(cands) {
-            Some(bin) => out.push(curated_app(title, "app", &bin, Some(icon), None, Vec::new(), true)),
-            None => out.push(curated_app(title, "app", cands[0], Some(icon), None, Vec::new(), false)),
+            Some(bin) => out.push(curated_app(title, "app", &bin, Some(icon), None, Vec::new(), true, None)),
+            None => out.push(curated_app(title, "app", cands[0], Some(icon), None, Vec::new(), false, None)),
         }
     }
 
@@ -193,8 +211,8 @@ pub fn scan_curated_games(_cfg: &Config) -> Vec<Game> {
         .find(|(_, _, cands)| resolve_bin(cands).is_some())
         .unwrap_or(&FILE_MANAGERS[0]);
     match resolve_bin(fm.2) {
-        Some(bin) => out.push(curated_app(fm.0, "app", &bin, Some(fm.1), None, Vec::new(), true)),
-        None => out.push(curated_app(fm.0, "app", fm.2[0], Some(fm.1), None, Vec::new(), false)),
+        Some(bin) => out.push(curated_app(fm.0, "app", &bin, Some(fm.1), None, Vec::new(), true, None)),
+        None => out.push(curated_app(fm.0, "app", fm.2[0], Some(fm.1), None, Vec::new(), false, None)),
     }
 
     for def in EMULATORS {
@@ -208,6 +226,7 @@ pub fn scan_curated_games(_cfg: &Config) -> Vec<Game> {
                 Some(def.platform),
                 exts,
                 true,
+                Some(def.rom_dir),
             )),
             None => out.push(curated_app(
                 def.pretty,
@@ -217,6 +236,7 @@ pub fn scan_curated_games(_cfg: &Config) -> Vec<Game> {
                 Some(def.platform),
                 exts,
                 false,
+                Some(def.rom_dir),
             )),
         }
     }

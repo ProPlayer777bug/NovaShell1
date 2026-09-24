@@ -86,6 +86,7 @@ pub fn scan_heroic_games(cfg: &Config) -> Vec<Game> {
                 installed: true,
                 platform: None,
                 rom_exts: Vec::new(),
+            rom_dir: None,
             }
         })
         .collect()

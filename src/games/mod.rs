@@ -88,6 +88,10 @@ pub struct Game {
     /// ROM file extensions this emulator tile can boot (empty for normal apps).
     #[serde(default)]
     pub rom_exts: Vec<String>,
+    /// Folder (relative to home) where this console's games live, e.g. "PS2".
+    /// The ROM picker opens here on the first visit.
+    #[serde(default)]
+    pub rom_dir: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -313,6 +317,7 @@ mod tests {
             installed: true,
             platform: None,
             rom_exts: Vec::new(),
+            rom_dir: None,
         }
     }
 
