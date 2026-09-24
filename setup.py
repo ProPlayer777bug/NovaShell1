@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""NovaShell setup: build and install on Ubuntu/Debian.
+"""NovaShell setup: install Rust, system deps, then build and install.
 
 Usage:
-    python3 setup.py                # system-wide install (needs sudo)
-    python3 setup.py --user         # per-user install (no root)
-    python3 setup.py --check        # only verify toolchain + system deps
+    python3 setup.py                # full: deps + rust + build + install
+    python3 setup.py --user         # per-user install (deps still system-wide)
+    python3 setup.py --check        # inspect-only, touches nothing
     python3 setup.py --uninstall    # remove a previous install
+
+Bootstrap (runs automatically if missing):
+    - installs rustup + stable Rust via https://sh.rustup.rs
+    - installs apt build packages:
+        build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev
+        libjavascriptcoregtk-6.0-dev libudev-dev
 
 Safe by design (same guarantees as scripts/install.sh):
     - never modifies GRUB, kernel params, initramfs, /etc/fstab,
@@ -13,7 +19,7 @@ Safe by design (same guarantees as scripts/install.sh):
     - GNOME stays installed and reachable as the desktop fallback
     - only writes to standard app / icon / autostart / systemd locations
 
-Requires: python3 >= 3.8 (stdlib only), cargo + system dev headers.
+Requires: python3 >= 3.8, curl (installed automatically), sudo for apt.
 """
 
 import argparse
@@ -53,6 +59,10 @@ RUNTIME_HINTS = [
     ("gnome-session-quit", "log out action"),
 ]
 
+CARGO_HOME = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
+CARGO_BIN = CARGO_HOME / "bin"
+CARGO = CARGO_BIN / "cargo"
+
 
 def log(msg: str) -> None:
     print(f"==> {msg}", flush=True)
@@ -67,13 +77,14 @@ def run(cmd, **kw) -> subprocess.CompletedProcess:
 
 
 def which(bin: str) -> Path | None:
-    return Path(shutil.which(bin)) if shutil.which(bin) else None
+    p = shutil.which(bin)
+    return Path(p) if p else None
 
 
 def is_deb_based() -> bool:
-    return os.path.exists("/etc/debian_version") or os.path.exists("/etc/os-release") and "debian" in (
-        (Path("/etc/os-release").read_text() if os.path.exists("/etc/os-release") else "")
-    ).lower()
+    os_release = Path("/etc/os-release")
+    text = os_release.read_text() if os_release.exists() else ""
+    return os.path.exists("/etc/debian_version") or "debian" in text.lower() or "ubuntu" in text.lower()
 
 
 def project_root() -> Path:
@@ -81,35 +92,83 @@ def project_root() -> Path:
     return Path(__file__).resolve().parent
 
 
-def check_rust() -> Path:
-    cargo = which("cargo")
-    if cargo is None:
-        log("Rust toolchain not found. Install it first:")
-        print(
-            "    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-        )
-        print("    then:  source ~/.cargo/env   (or log out/in)")
-        sys.exit(1)
-    ver = subprocess.run(
-        ["rustc", "--version"], capture_output=True, text=True
-    ).stdout.strip()
-    log(f"rustc: {ver}")
-    # Scripts/build.sh requires rustc >= 1.85 (webkit6 needs edition 2024).
-    m = None
-    import re
+def ensure_on_path() -> None:
+    """Make ~/.cargo/bin visible to this process and children."""
+    bin_dir = str(CARGO_BIN)
+    if bin_dir not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
 
-    m = re.search(r"rustc (\d+)\.(\d+)", ver)
-    if m:
-        maj, minor = int(m.group(1)), int(m.group(2))
-        if maj == 1 and minor >= 85:
-            return cargo
-    warn("rustc < 1.85 detected; update with:  rustup update stable")
-    return cargo
+
+def ensure_rust() -> None:
+    """Install rustup + stable Rust if cargo is missing; refresh PATH."""
+    ensure_on_path()
+    if which("cargo") is not None:
+        ver = subprocess.run(["rustc", "--version"], capture_output=True, text=True).stdout.strip()
+        log(f"rustc found: {ver}")
+        return
+    if which("rustup") is not None:
+        log("rustup present; installing stable toolchain")
+        if run(["rustup", "default", "stable"], cwd=str(project_root())).returncode != 0:
+            print("    rustup default failed. Run manually and retry.")
+            sys.exit(1)
+        ensure_on_path()
+        return
+    log("Rust not found; installing rustup + stable (curl | sh)")
+    curl = which("curl")
+    if curl is None:
+        print("    curl is required to install rustup. Install it first:")
+        print("        sudo apt update && sudo apt install -y curl")
+        sys.exit(1)
+    script = subprocess.Popen(
+        # -y (default toolchain stable), --profile minimal still gives cargo.
+        [str(curl), "--proto", "=https", "--tlsv1.2", "-sSf", "https://sh.rustup.rs"],
+        stdout=subprocess.PIPE,
+        stdin=subprocess.PIPE,
+        text=True,
+    )
+    stdout, _ = script.communicate(input="-y\n")
+    if script.returncode != 0:
+        print("    rustup install failed (exit %d). See output above." % script.returncode)
+        sys.exit(1)
+    ensure_on_path()
+    ver = subprocess.run([str(CARGO), "--version"], capture_output=True, text=True).stdout.strip()
+    log(f"installed: {ver}")
+
+
+def require_sudo() -> None:
+    """Ensure we can run sudo; prompts for the password when needed."""
+    if os.geteuid() == 0:
+        return
+    r = run(["sudo", "-n", "true"])
+    if r.returncode != 0:
+        print("    sudo password needed for system packages.")
+        run(["sudo", "true"], check=True)
+
+
+def ensure_system_deps() -> None:
+    """apt update + install BUILD_DEPS (skipped on non-deb systems)."""
+    if not is_deb_based():
+        warn("Not a Debian/Ubuntu OS; install these yourself:")
+        print("        " + " ".join(BUILD_DEPS))
+        return
+    if which("apt-get") is None:
+        warn("apt-get not found; skipping system dependency install.")
+        return
+    require_sudo()
+    log("installing system packages (apt)")
+    cmd = [] if os.geteuid() == 0 else ["sudo"]
+    log("apt update")
+    run(cmd + ["apt-get", "update"])
+    log("apt install: " + " ".join(BUILD_DEPS))
+    r = run(cmd + ["apt-get", "install", "-y"] + BUILD_DEPS)
+    if r.returncode != 0:
+        print("    apt install failed; cannot continue.")
+        sys.exit(1)
 
 
 def check_dev_headers() -> None:
     if which("pkg-config") is None:
-        print("    pkg-config not found. Run: sudo apt install pkg-config")
+        print("    pkg-config not found; rerun setup (system deps step installs it).")
         sys.exit(1)
     missing = []
     for pkg in ("gtk4", "javascriptcoregtk-6.0", "webkitgtk-6.0"):
@@ -117,7 +176,7 @@ def check_dev_headers() -> None:
             missing.append(pkg)
     if missing:
         print(f"    missing dev packages: {', '.join(missing)}")
-        print("    Install them:  sudo apt install " + " ".join(BUILD_DEPS))
+        print("        Re-run: python3 setup.py   (installs them via apt)")
         sys.exit(1)
     for pkg in ("gtk4", "javascriptcoregtk-6.0", "webkitgtk-6.0"):
         v = subprocess.run(
@@ -126,33 +185,27 @@ def check_dev_headers() -> None:
         print(f"    found: {pkg} {v}")
 
 
-def install_system_deps() -> None:
-    if not is_deb_based():
-        log("Not a Debian/Ubuntu system; skipping apt dependency install.")
-        print("    Install equivalents yourself: " + " ".join(BUILD_DEPS))
+def check_rust_version() -> None:
+    """Enforce rustc >= 1.85 (webkit6 needs edition 2024)."""
+    import re
+
+    ver = subprocess.run(["rustc", "--version"], capture_output=True, text=True).stdout.strip()
+    m = re.search(r"rustc (\d+)\.(\d+)", ver)
+    if not m:
+        print("    cannot parse rustc version:", ver)
+        sys.exit(1)
+    maj, minor = int(m.group(1)), int(m.group(2))
+    if maj > 1 or (maj == 1 and minor >= 85):
         return
-    if which("apt-get") is None:
-        warn("apt-get not found; skipping system dependency install.")
-        return
-    need = [d for d in BUILD_DEPS if run(["pkg-config", "--exists", d]).returncode != 0]
-    if not need and which("build-essential") is not None:
-        # build-essential has no pkg-config test; just run full install for safety.
-        need = BUILD_DEPS
-    log(f"installing system packages: {' '.join(need)}")
-    r = run(["sudo", "-n", "true"])
+    print(f"    rustc {maj}.{minor} is too old (need >= 1.85). Updating: rustup update stable")
+    r = run(["rustup", "update", "stable"])
     if r.returncode != 0:
-        run(["sudo", "apt-get", "update"])
-    else:
-        run(["sudo", "-n", "apt-get", "update"])
-    r = run(["sudo", "-n", "apt-get", "install", "-y"] + need)
-    if r.returncode != 0:
-        # fall back to interactive sudo
-        run(["sudo", "apt-get", "install", "-y"] + need)
+        sys.exit(1)
 
 
 def build() -> None:
     log("building release binary (cargo build --release)")
-    r = run(["cargo", "build", "--release"], cwd=str(project_root()))
+    r = run([str(CARGO), "build", "--release"], cwd=str(project_root()))
     if r.returncode != 0:
         print("    build failed. See output above.")
         sys.exit(1)
@@ -172,7 +225,7 @@ def install_files(user: bool) -> None:
         systemd_dir = home / ".config" / "systemd" / "user"
     else:
         if os.geteuid() != 0:
-            print("System-wide install needs root. Re-run with sudo, or use --user.")
+            print("System-wide install needs root. Re-run: sudo python3 setup.py  (or use --user)")
             sys.exit(1)
         bin_dir = Path("/usr/local/bin")
         apps_dir = Path("/usr/local/share/applications")
@@ -197,13 +250,16 @@ def install_files(user: bool) -> None:
     service = service.replace("@BINARY@", str(bin_dir / BIN_NAME))
     (systemd_dir / "novashell.service").write_text(service)
 
-    log("installed to:")
-    for f in (bin_dir / BIN_NAME, apps_dir / "novashell.desktop",
-              icons_dir / "org.novashell.svg", autostart_dir / "novashell.desktop",
-              systemd_dir / "novashell.service"):
+    log("installed files:")
+    for f in (
+        bin_dir / BIN_NAME,
+        apps_dir / "novashell.desktop",
+        icons_dir / "org.novashell.svg",
+        autostart_dir / "novashell.desktop",
+        systemd_dir / "novashell.service",
+    ):
         print(f"    {f}")
 
-    # Refresh icon cache + systemd user units, best effort.
     if which("gtk-update-icon-cache"):
         run(["gtk-update-icon-cache", str(icons_dir.parent.parent.parent)], check=False)
     if which("systemctl"):
@@ -220,7 +276,7 @@ def uninstall(user: bool) -> None:
         systemd_dir = home / ".config" / "systemd" / "user"
     else:
         if os.geteuid() != 0:
-            print("System-wide uninstall needs root. Re-run with sudo, or use --user.")
+            print("System-wide uninstall needs root. Re-run: sudo python3 setup.py --uninstall")
             sys.exit(1)
         bin_dir, apps_dir = Path("/usr/local/bin"), Path("/usr/local/share/applications")
         icons_dir = Path("/usr/local/share/icons/hicolor/scalable/apps")
@@ -241,18 +297,18 @@ def uninstall(user: bool) -> None:
 
 
 def check_mode() -> None:
-    log("checking environment")
-    check_rust()
+    log("checking environment (no changes made)")
+    check_rust_version()
     check_dev_headers()
     for tool, use in RUNTIME_HINTS:
         print(f"    {'OK ' if which(tool) else '---'} {tool:16s} {use}")
-    print("    Environment OK: dependencies are satisfied.")
+    print("    Environment check done.")
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Build and install NovaShell")
+    ap = argparse.ArgumentParser(description="Bootstrap, build and install NovaShell")
     ap.add_argument("--user", action="store_true", help="per-user install")
-    ap.add_argument("--check", action="store_true", help="verify toolchain + deps only")
+    ap.add_argument("--check", action="store_true", help="verify only, change nothing")
     ap.add_argument("--uninstall", action="store_true", help="remove NovaShell")
     args = ap.parse_args()
 
@@ -269,7 +325,9 @@ def main() -> None:
         return
 
     log(f"NovaShell setup ({'user' if args.user else 'system'})")
-    check_rust()
+    ensure_rust()
+    ensure_system_deps()
+    check_rust_version()
     check_dev_headers()
     build()
     install_files(user=args.user)

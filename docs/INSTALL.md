@@ -1,5 +1,28 @@
 # Installing NovaShell
 
+## One-command (recommended)
+
+`setup.py` installs Rust, system packages, then builds and installs NovaShell:
+
+```bash
+# full bootstrap + system-wide install (prompts for sudo)
+python3 setup.py
+
+# per-user install (system packages are still installed via sudo)
+python3 setup.py --user
+
+# inspect-only, changes nothing
+python3 setup.py --check
+```
+
+Bootstrap steps run automatically when missing:
+
+- **Rust**: `curl ... https://sh.rustup.rs | sh` + stable toolchain
+- **Packages**: `apt install build-essential pkg-config libgtk-4-dev
+  libwebkitgtk-6.0-dev libjavascriptcoregtk-6.0-dev libudev-dev`
+
+## Manual (classic shell scripts)
+
 Prereqs: see [BUILDING.md](BUILDING.md) — you need Rust ≥ 1.85 and the GTK/
 WebKit dev headers to compile once during install.
 
@@ -10,7 +33,7 @@ WebKit dev headers to compile once during install.
 sudo ./scripts/install.sh
 ```
 
-Installs to:
+Installs to the same locations as `python3 setup.py` (system-wide):
 
 | File | Location |
 | --- | --- |
