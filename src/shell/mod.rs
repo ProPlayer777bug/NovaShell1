@@ -30,6 +30,34 @@ pub struct RunOptions {
     pub help: bool,
 }
 
+/// Choose the graphics backend *before* GTK/WebKit initialize.
+///
+/// Under WSLg (`/mnt/wslg` plus `WSL_INTEROP`) the Mesa D3D12/EGL stack cannot
+/// create a surfaceless EGL display, which is what GTK4's GSK renderer and
+/// WebKitGTK probe at startup. That leaves the window mapped but blank.
+/// Detect WSLg and fall back to a normal X11 window with GTK's cairo renderer
+/// and WebKit's CPU (DMABUF-less) path — the combination verified to work.
+/// On real desktops (no `/mnt/wslg`) we leave rendering alone (full GPU).
+/// All settings respect an explicit user-supplied env override.
+pub fn configure_graphics_backend() {
+    if !std::path::Path::new("/mnt/wslg").exists()
+        || std::env::var_os("WSL_INTEROP").is_none()
+    {
+        return;
+    }
+    eprintln!("NovaShell: WSLg detected — using X11 + software rendering fallback");
+    for (key, value) in [
+        ("GDK_BACKEND", "x11"),
+        ("GSK_RENDERER", "cairo"),
+        ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
+        ("WEBKIT_FORCE_SANDBOX", "0"),
+    ] {
+        if std::env::var_os(key).is_none() {
+            std::env::set_var(key, value);
+        }
+    }
+}
+
 pub fn parse_args() -> RunOptions {
     let mut o = RunOptions {
         fullscreen: true,
@@ -141,6 +169,7 @@ fn install_panic_hook() {
 
 /// Run the shell as a child, restarting it if it crashes.
 pub fn watchdog(opts: &RunOptions) -> Result<()> {
+    configure_graphics_backend();
     init_logging(opts.debug);
     log::warn!("watchdog supervising the shell (max 3 restarts)");
     let exe = std::env::current_exe().context("resolving current executable")?;
@@ -193,6 +222,7 @@ struct AppState {
 }
 
 pub fn run(opts: RunOptions) -> Result<()> {
+    configure_graphics_backend();
     init_logging(opts.debug);
     install_panic_hook();
     util::ensure_dirs().context("creating data directories")?;
