@@ -43,11 +43,25 @@ pub const CURATED_BINS: &[&str] = &[
     "cemu",
 ];
 
+/// Directories that hold game/emulator binaries but are often missing from a
+/// desktop session's PATH (`/usr/games` is where the pcsx2 package installs).
+const EXTRA_BIN_DIRS: &[&str] = &["/usr/games", "/usr/local/games", "/snap/bin"];
+
 /// Resolve a binary name to a full path via PATH (or `None`).
 pub fn find_bin(name: &str) -> Option<String> {
+    if name.contains('/') {
+        let direct = std::path::PathBuf::from(name);
+        return direct.is_file().then(|| direct.to_string_lossy().to_string());
+    }
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         let cand = dir.join(name);
+        if cand.is_file() {
+            return Some(cand.to_string_lossy().to_string());
+        }
+    }
+    for dir in EXTRA_BIN_DIRS {
+        let cand = std::path::Path::new(dir).join(name);
         if cand.is_file() {
             return Some(cand.to_string_lossy().to_string());
         }
@@ -81,6 +95,15 @@ pub fn first_installed_file_manager() -> Option<String> {
     FILE_MANAGERS
         .iter()
         .find_map(|(_, bin, _)| find_bin(bin))
+}
+
+/// True when this binary is one of the per-console emulator launchers. The apps
+/// provider always emits exactly one tile per console, so a desktop entry for
+/// the same binary is a duplicate that would also lose the ROM picker.
+pub fn is_emulator_bin(name: &str) -> bool {
+    EMULATORS
+        .iter()
+        .any(|def| def.bins.iter().any(|b| *b == name))
 }
 
 struct EmulatorDef {
@@ -349,6 +372,13 @@ mod tests {
         assert!(is_curated_bin("firefox"));
         assert!(is_curated_bin("/usr/bin/pcsx2"));
         assert!(is_curated_bin("xdg-desktop-portal-gtk") == false);
+        // Emulator binaries must be recognised so the desktop provider never
+        // adds a duplicate tile that launches the bare emulator.
+        assert!(is_emulator_bin("pcsx2-qt"));
+        assert!(is_emulator_bin("dolphin-emu"));
+        assert!(is_emulator_bin("retroarch"));
+        assert!(!is_emulator_bin("nautilus"));
+        assert!(!is_emulator_bin("brave-browser"));
     }
 
     #[test]

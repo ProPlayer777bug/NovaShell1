@@ -177,18 +177,21 @@ pub fn scan_desktop_games(cfg: &Config) -> Vec<Game> {
                 None => continue,
             };
             // Curated apps/emulators (browsers, file managers, emulators) are
-            // owned by the `apps` provider. Skip here only when the curated
-            // provider also resolves the binary, so flatpak/snap installs the
-            // PATH lookup misses still get a tile from the desktop scan.
+            // owned by the `apps` provider. Emulator binaries are always
+            // skipped: the apps provider lists one tile per console with a ROM
+            // picker, and a second desktop tile would be a duplicate that
+            // launches the bare emulator. Other curated apps are skipped only
+            // when the apps provider also resolves the binary, so flatpak/snap
+            // installs the PATH lookup misses still get a tile here.
+            let bin_name = Path::new(&program)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if crate::integrations::apps::is_emulator_bin(&bin_name) {
+                continue;
+            }
             if crate::integrations::apps::is_curated_bin(&program)
-                && crate::integrations::apps::find_bin(
-                    Path::new(&program)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default()
-                        .as_str(),
-                )
-                .is_some()
+                && crate::integrations::apps::find_bin(&bin_name).is_some()
             {
                 continue;
             }

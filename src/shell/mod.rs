@@ -76,6 +76,23 @@ pub fn configure_graphics_backend() {
         }
     }
     eprintln!("NovaShell: WSL detected — using X11 + software rendering fallback");
+    // Game packages install into /usr/games, which desktop sessions often omit
+    // from PATH; add the usual extras so emulators resolve (and so the apps we
+    // launch inherit a working PATH).
+    if let Some(have) = std::env::var_os("PATH") {
+        let mut parts: Vec<std::ffi::OsString> = std::env::split_paths(&have)
+            .map(|p| p.into_os_string())
+            .collect();
+        for extra in ["/usr/games", "/usr/local/games", "/snap/bin"] {
+            let p = std::ffi::OsString::from(extra);
+            if !parts.contains(&p) {
+                parts.push(p);
+            }
+        }
+        if let Ok(joined) = std::env::join_paths(parts) {
+            std::env::set_var("PATH", joined);
+        }
+    }
     for (key, value) in [
         ("GDK_BACKEND", "x11"),
         ("GSK_RENDERER", "cairo"),
