@@ -1387,8 +1387,10 @@ fn console_polish(program: &str) -> Vec<String> {
             fs_profile("chrome")
         }
         "retroarch" => vec!["-f".into()],
-        "dolphin-emu" | "dolphin" => vec!["-f".into()],
-        "pcsx2" | "pcsx2-qt" => vec!["--fullscreen".into()],
+        // PCSX2 and Dolphin reject unknown command-line switches outright
+        // ("unknown parameter -fullscreen", exit 1) and both already start
+        // fullscreen from their own settings, so they get no extra flags.
+        "dolphin-emu" | "dolphin" | "pcsx2" | "pcsx2-qt" => vec![],
         _ => vec![],
     }
 }
