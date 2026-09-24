@@ -32,8 +32,8 @@ anyhow = "1"
 
 # Linux-only GUI / input core (logic modules stay cross-platform for tests)
 [target.'cfg(target_os = "linux")'.dependencies]
-gtk4 = { version = "0.11", features = ["v4_22"] }
-webkit6 = "0.6"
+gtk4 = { version = "0.10", features = ["v4_14"] }
+webkit6 = "0.5"
 gilrs = "0.11"
 
 [profile.release]
