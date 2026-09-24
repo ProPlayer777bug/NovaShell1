@@ -84,6 +84,10 @@ pub fn configure_graphics_backend() {
         // Qt-based titles (PCSX2, Dolphin) try a wayland platform plugin that
         // does not exist here; point them at the X11 backend we actually run.
         ("QT_QPA_PLATFORM", "xcb"),
+        // No desktop cues a cursor theme; give WebKit/GTK one so the pointer
+        // is actually visible in the WSLg window.
+        ("XCURSOR_THEME", "Adwaita"),
+        ("XCURSOR_SIZE", "24"),
         // Force mesa onto llvmpipe so the d3d12/zink paths can never crash.
         ("LIBGL_ALWAYS_SOFTWARE", "1"),
         ("GALLIUM_DRIVER", "llvmpipe"),
@@ -905,6 +909,11 @@ fn launch_by_id(state: &AppState, game_id: &str, rom: Option<&str>, id: &str) {
 /// thread; the UI is told via `_install_done` when it finishes.
 fn run_apt_install(pkgs: &[String]) -> Result<()> {
     log::info!("installing via apt: {}", pkgs.join(" "));
+    for pkg in pkgs {
+        if crate::integrations::apps::needs_repo(pkg) {
+            crate::integrations::apps::ensure_third_party_repo(pkg).map_err(|e| anyhow!(e))?;
+        }
+    }
     let status = std::process::Command::new("apt-get")
         .args(["install", "-y", "--no-install-recommends"])
         .args(pkgs)
@@ -934,7 +943,10 @@ fn launch_spec(state: &AppState, spec: &Spec, library_id: Option<&str>) -> Resul
     send_event(state, json!({ "event": "game_start", "title": title }));
 
     let sender = state.sender.clone();
-    let hide_mode = state.opts.fullscreen && !state.opts.windowed;
+    // Always hide the shell window while something else runs, regardless of
+    // windowed/fullscreen, so the launched app takes the screen on its own
+    // instead of sitting next to a second NovaShell window.
+    let hide_mode = true;
 
     // Wait for the child. If it dies within the first ~1.4s (e.g. a Qt app
     // that cannot find its backend), tell the UI it failed so the shell comes
@@ -985,15 +997,13 @@ fn handle_core_event(state: &AppState, v: &Value) {
     if v.get("_internal").and_then(|x| x.as_bool()).unwrap_or(false)
         && v["event"].as_str() == Some("_launch_hide")
     {
-        if state.opts.fullscreen && !state.opts.windowed {
-            state.window.set_visible(false);
-        }
+        state.window.set_visible(false);
     }
     if v.get("_internal").and_then(|x| x.as_bool()).unwrap_or(false)
         && v["event"].as_str() == Some("_launch_failed")
     {
+        state.window.present();
         if state.opts.fullscreen && !state.opts.windowed {
-            state.window.present();
             state.window.fullscreen();
         }
         log::warn!("{} exited on start (code {:?})", v["title"].as_str().unwrap_or("?"), v["code"].as_i64());
@@ -1019,8 +1029,8 @@ fn handle_core_event(state: &AppState, v: &Value) {
                 }
             }
             log::info!("{} closed after {secs}s", r.title);
+            state.window.present();
             if state.opts.fullscreen && !state.opts.windowed {
-                state.window.present();
                 state.window.fullscreen();
             }
         }

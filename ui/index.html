@@ -11,6 +11,7 @@
      Scaling is rem-driven so the whole UI adapts to any resolution
      (1080p / 4K) through the config ui_scale value.
      ============================================================= */
+  html, body { cursor: default; }
   :root {
     --accent: #7c3aed;
     --accent-rgb: 124, 58, 237;
@@ -729,30 +730,15 @@ function moveFocus(dir) {
   for (const f of nav.grid) {
     if (f.el === cur) continue;
     const dx = f.x - x, dy = f.y - y;
-    let score = Infinity;
-    if (dir === "left" && dx < 0 && dy === 0) score = -dx;
-    if (dir === "right" && dx > 0 && dy === 0) score = dx + Math.abs(dy) * 1000;
-    if (dir === "up" && dy < 0 && dx === 0) score = -dy;
-    if (dir === "down" && dy > 0 && dx === 0) score = dy + Math.abs(dx) * 1000;
-    if (dir === "left" && dx < 0 && dy !== 0) score = -dx + Math.abs(dy) * 500;
-    if (dir === "up" && dy < 0 && dx !== 0) score = -dy + Math.abs(dx) * 500;
-    if (score < bestScore) { bestScore = score; best = f.el; }
-  }
-  // Fallback: allow drifting to nearest element in general direction.
-  if (!best) {
-    for (const f of nav.grid) {
-      if (f.el === cur) continue;
-      const dx = f.x - x, dy = f.y - y;
-      const ok =
-        (dir === "left" && dx < 0) || (dir === "right" && dx > 0) ||
-        (dir === "up" && dy < 0) || (dir === "down" && dy > 0);
-      if (!ok) continue;
-      const score = Math.abs(dx) + Math.abs(dy);
-      if (score < bestScore) { bestScore = score; best = f.el; }
-    }
+    let ok = false, score = 0;
+    if (dir === "left") { ok = dx < 0; score = -dx + Math.abs(dy) * 2; }
+    else if (dir === "right") { ok = dx > 0; score = dx + Math.abs(dy) * 2; }
+    else if (dir === "up") { ok = dy < 0; score = -dy + Math.abs(dx) * 2; }
+    else if (dir === "down") { ok = dy > 0; score = dy + Math.abs(dx) * 2; }
+    if (ok && score < bestScore) { bestScore = score; best = f.el; }
   }
   if (best) {
-    if (nav.current.hasAttribute("data-slider-active")) exitSlider();
+    if (cur.hasAttribute("data-slider-active")) exitSlider();
     focus(best);
   }
 }
@@ -1068,9 +1054,10 @@ function renderRoms(r, done) {
   const others = items.filter((e) => !e.is_dir && !romKind(e.name));
   const show = dirs.concat(files, others.slice(0, 25));
   if (!show.length) {
-    box.innerHTML = '<div class="rom-empty">No folders or compatible game files here.</div>';
+    const exts = Object.keys(romState.ext).join(" / ");
+    box.innerHTML = '<div class="rom-empty">No games found in this folder.</div>';
     $("#rom-path").textContent = folder.path;
-    $("#rom-hint").textContent = "Try a different folder.";
+    $("#rom-hint").textContent = "Put your game files here (accepted: " + (exts || "any file") + "), or open a subfolder that has them. Press Esc to go back.";
     return;
   }
   show.forEach((e) => rows.push(romItem(e.name, e.path, e.is_dir, !e.is_dir, rows.length)));

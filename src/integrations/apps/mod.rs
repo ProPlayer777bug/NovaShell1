@@ -263,8 +263,8 @@ pub fn apt_packages_for_program(program: &str) -> Option<&'static [&'static str]
         ("chromium", &[]),
         ("chromium-browser", &[]),
         ("google-chrome", &[]),
-        ("google-chrome-stable", &[]),
-        ("brave-browser", &[]),
+        ("google-chrome-stable", &["google-chrome-stable"]),
+        ("brave-browser", &["brave-browser"]),
         ("nautilus", &["nautilus"]),
         ("nemo", &["nemo"]),
         ("thunar", &["thunar"]),
@@ -286,6 +286,30 @@ pub fn apt_packages_for_program(program: &str) -> Option<&'static [&'static str]
         ("cemu", &[]),
     ];
     map.iter().find(|(k, _)| *k == key).map(|(_, pkgs)| *pkgs)
+}
+
+/// Packages that are only available from a third-party apt repository.
+pub fn needs_repo(pkg: &str) -> bool {
+    matches!(pkg, "brave-browser" | "google-chrome-stable")
+}
+
+/// Install the matching vendor apt repo so `apt-get` can then find the
+/// package. Idempotent; safe to call before every install attempt.
+pub fn ensure_third_party_repo(pkg: &str) -> Result<(), String> {
+    let script = match pkg {
+        "brave-browser" => include_str!("repos/brave.sh"),
+        "google-chrome-stable" => include_str!("repos/chrome.sh"),
+        _ => return Ok(()),
+    };
+    let status = std::process::Command::new("sh")
+        .args(["-c", script])
+        .status()
+        .map_err(|e| format!("could not run repo setup: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("could not add the {pkg} repository"))
+    }
 }
 
 #[cfg(test)]
@@ -315,7 +339,9 @@ mod tests {
         assert_eq!(apt_packages_for_program("dolphin-emu"), Some(&["dolphin-emu"][..]));
         assert_eq!(apt_packages_for_program("retroarch"), Some(&["retroarch"][..]));
         assert_eq!(apt_packages_for_program("/usr/bin/firefox"), Some(&[][..]));
-        assert_eq!(apt_packages_for_program("brave-browser"), Some(&[][..]));
+        assert_eq!(apt_packages_for_program("brave-browser"), Some(&["brave-browser"][..]));
+        assert!(needs_repo("brave-browser"));
+        assert!(!needs_repo("nautilus"));
     }
 
     #[test]
