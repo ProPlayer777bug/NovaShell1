@@ -844,7 +844,7 @@ function launchGame(id) {
   if (game.installed === false) { installGame(game); return; }
   if (game.source === "emulator") {
     const ext = (game.rom_exts || [])[0] || "game";
-    toast("Launching " + game.title + " — select the " + ext.toUpperCase() + " to play");
+    toast("Opening Files — pick your " + ext.toUpperCase() + " there");
     openRomPicker(game);
     return;
   }
