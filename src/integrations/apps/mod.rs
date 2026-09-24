@@ -106,20 +106,20 @@ pub fn is_emulator_bin(name: &str) -> bool {
         .any(|def| def.bins.iter().any(|b| *b == name))
 }
 
-struct EmulatorDef {
-    platform: &'static str,
-    pretty: &'static str,
-    icon: &'static str,
-    bins: &'static [&'static str],
-    exts: &'static [&'static str],
+pub struct EmulatorDef {
+    pub platform: &'static str,
+    pub pretty: &'static str,
+    pub icon: &'static str,
+    pub bins: &'static [&'static str],
+    pub exts: &'static [&'static str],
     /// Folder under the user's home where this console's games are kept, and
     /// the folder the ROM picker opens on the very first visit.
-    rom_dir: &'static str,
+    pub rom_dir: &'static str,
 }
 
 /// Per-console emulator definitions. Only one tile per console (first
 /// installed binary wins) but the `rom_exts` let the UI offer a ROM picker.
-const EMULATORS: &[EmulatorDef] = &[
+pub const EMULATORS: &[EmulatorDef] = &[
     EmulatorDef {
         platform: "PSX",
         pretty: "PlayStation 1 / PSX",

@@ -28,6 +28,8 @@ pub struct RunOptions {
     pub debug: bool,
     pub watchdog: bool,
     pub help: bool,
+    /// `novashell --play <file>`: play a game file headlessly and exit.
+    pub play: Option<String>,
 }
 
 /// Normalise `$HOME` so the data dirs (library, config, logs) are the same
@@ -143,8 +145,10 @@ pub fn parse_args() -> RunOptions {
         debug: false,
         watchdog: false,
         help: false,
+        play: None,
     };
-    for a in std::env::args().skip(1) {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => o.help = true,
             "--fullscreen" => o.fullscreen = true,
@@ -154,6 +158,14 @@ pub fn parse_args() -> RunOptions {
             }
             "-d" | "--debug" => o.debug = true,
             "--watchdog" => o.watchdog = true,
+            // `novashell --play <game.iso>`: headless "open this game with the
+            // right emulator". This is what the file manager runs when a game
+            // file is double-clicked, so the selection is handed to the shell
+            // instead of the desktop trying to mount the disc image.
+            "--play" => o.play = args.next(),
+            other if other.starts_with("--play=") => {
+                o.play = Some(other["--play=".len()..].to_string())
+            }
             _ => {}
         }
     }
@@ -376,6 +388,14 @@ pub fn run(opts: RunOptions) -> Result<()> {
     if opts.help {
         print_help();
         return Ok(());
+    }
+
+    // Headless "play this game file" mode: used as the file manager's handler
+    // for disc images, so double-clicking a game in Files starts it.
+    if let Some(path) = opts.play.clone() {
+        normalize_home();
+        configure_graphics_backend();
+        return play_game_file(&path);
     }
 
     gtk::init().map_err(|e| anyhow!("GTK init failed (is a display available?): {e}"))?;
@@ -737,16 +757,23 @@ fn route(state: &AppState, msg: Value) {
         // while the file manager is up.
         "roms:pick" => {
             let game_id = msg["id"].as_str().unwrap_or("").to_string();
+            log::info!("roms:pick requested for {game_id}");
             let game = state.library.borrow().get(&game_id).cloned();
             match game {
                 Some(g) => {
                     let dir = console_rom_dir(&g)
                         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
                     let _ = std::fs::create_dir_all(&dir);
-                    if let Some(program) = integrations::apps::first_installed_file_manager() {
-                        let spec = Spec::new("Files", program)
-                            .arg(dir.to_string_lossy().to_string());
-                        let _ = spawn_background(&spec);
+                    match integrations::apps::first_installed_file_manager() {
+                        Some(program) => {
+                            log::info!("roms:pick opening Files ({program}) on {}", dir.display());
+                            let spec = Spec::new("Files", program)
+                                .arg(dir.to_string_lossy().to_string());
+                            if let Err(e) = spawn_background(&spec) {
+                                log::error!("roms:pick could not start Files: {e}");
+                            }
+                        }
+                        None => log::error!("roms:pick: no file manager installed"),
                     }
                     // Give the shell window away so the file manager is on top.
                     state.window.set_visible(false);
@@ -1364,6 +1391,75 @@ fn console_polish(program: &str) -> Vec<String> {
         "pcsx2" | "pcsx2-qt" => vec!["--fullscreen".into()],
         _ => vec![],
     }
+}
+
+/// Play a game file without the GUI: find the emulator for its extension, keep
+/// a copy in the console's folder, remember it, and boot it. This is what the
+/// desktop file manager runs when a disc image is opened.
+fn play_game_file(path: &str) -> Result<()> {
+    let src = std::path::Path::new(path);
+    if !src.is_file() {
+        anyhow::bail!("not a game file: {path}");
+    }
+    let ext = src
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    // Pick the emulator for this file: an installed one wins, so a bare ".iso"
+    // does not land on PSX (often not installed) when PCSX2 is.
+    let matching = integrations::apps::EMULATORS
+        .iter()
+        .filter(|d| d.exts.iter().any(|e| e.eq_ignore_ascii_case(&ext)))
+        .collect::<Vec<_>>();
+    let chosen = matching
+        .iter()
+        .find(|d| d.bins.iter().any(|b| integrations::apps::find_bin(b).is_some()))
+        .copied()
+        .or_else(|| matching.first().copied())
+        .ok_or_else(|| anyhow!("no emulator handles '.{ext}' files"))?;
+    let def = chosen;
+    let bin = def
+        .bins
+        .iter()
+        .find_map(|b| integrations::apps::find_bin(b))
+        .ok_or_else(|| anyhow!("{} is not installed", def.pretty))?;
+
+    // Keep the master copy in the console folder and play that.
+    let dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(def.rom_dir.trim_start_matches("~/"));
+    let _ = std::fs::create_dir_all(&dir);
+    let game = if src.starts_with(&dir) {
+        src.to_path_buf()
+    } else {
+        match copy_into(src, &dir) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("novashell: could not copy into {}: {e}", dir.display());
+                src.to_path_buf()
+            }
+        }
+    };
+
+    let mut lib = crate::roms::RomLibrary::load();
+    let bin_name = std::path::Path::new(&bin)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| bin.clone());
+    lib.remember(&format!("emulator-{bin_name}"), &game.to_string_lossy());
+
+    let mut spec = Spec::new(def.pretty, bin).arg(game.to_string_lossy().to_string());
+    let flags = console_polish(&spec.program);
+    if !flags.is_empty() {
+        let mut all = flags;
+        all.extend(spec.args.clone());
+        spec.args = all;
+    }
+    let mut child = crate::launcher::spawn(&spec)?;
+    eprintln!("novashell: playing {} with {}", game.display(), def.pretty);
+    let _ = child.wait();
+    Ok(())
 }
 
 /// The console's own game folder (e.g. `~/PS2`) for an emulator tile.

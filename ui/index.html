@@ -1055,42 +1055,18 @@ const romState = { game: null, path: "", ext: {}, sig: "" };
 let romWatch = null;
 function romOpen() { return $("#rom-ov").classList.contains("open"); }
 
-// Watch the current folder while the picker is open: when a game file shows
-// up (e.g. the user just dropped an .iso in from the file manager) refresh the
-// list and point it out, so selecting it is all that is left to do.
-function startRomWatch() {
-  stopRomWatch();
-  romWatch = setInterval(() => {
-    if (!romOpen() || !romState.path) return;
-    post("files:list", { path: romState.path }).then((r) => {
-      if (!r || !r.ok || !romOpen()) return;
-      const files = (r.folder.entries || []).filter((e) => !e.is_dir && romKind(e.name));
-      const sig = files.map((e) => e.name).join("|");
-      if (sig && sig !== romState.sig) {
-        const isNew = !romState.sig;
-        romState.sig = sig;
-        renderRoms(r);
-        if (isNew) toast("Found " + files[files.length - 1].name + " — press Enter to play", "ok");
-      }
-    });
-  }, 2500);
-}
-function stopRomWatch() {
-  if (romWatch) { clearInterval(romWatch); romWatch = null; }
-}
-
 function openRomPicker(game) {
   romState.game = game;
   romState.ext = {};
   romState.sig = "";
   (game.rom_exts || []).forEach((e) => (romState.ext[e.toLowerCase()] = true));
-  // Already have games for this console? Show them; otherwise hand over to the
-  // real Files window, where the game is chosen and opened.
+  // Ask the shell to open the real Files window on the console folder right
+  // away. Whether the console already has saved games is only used to decide
+  // if a picker should be shown too, so it must not gate the file manager.
+  post("roms:pick", { id: game.id });
   post("roms:list", { id: game.id }).then((r) => {
     const games = (r && r.games) || [];
-    if (games.length) { openRomBrowser(game, games); return; }
-    toast("Choose your game in the Files window");
-    post("roms:pick", { id: game.id });
+    if (games.length) openRomBrowser(game, games);
   });
   sfx.ok();
 }
