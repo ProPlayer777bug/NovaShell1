@@ -1135,21 +1135,20 @@ fn open_rom_chooser<F>(
 {
     use gtk::prelude::*;
 
-    // `FileChooserNative` is soft-deprecated in GTK 4.10 (GtkFileDialog is
-    // the replacement), but it renders the platform's native file picker,
-    // which is exactly the Chrome-style "upload file" dialog we want here.
+    // A plain GTK file-chooser dialog: `FileChooserNative` would need an
+    // xdg-desktop-portal, which does not exist in this session, and fails
+    // silently there. This renders in-process and still looks/behaves like the
+    // system "open file" dialog.
     thread_local! {
-        static OPEN_CHOOSERS: RefCell<Vec<gtk::FileChooserNative>> =
+        static OPEN_CHOOSERS: RefCell<Vec<gtk::FileChooserDialog>> =
             const { RefCell::new(Vec::new()) };
     }
 
-    let dialog = gtk::FileChooserNative::builder()
+    let dialog = gtk::FileChooserDialog::builder()
         .title(format!("Select a game file for {title}"))
         .transient_for(parent)
-        .action(gtk::FileChooserAction::Open)
-        .accept_label("Play")
-        .cancel_label("Cancel")
         .modal(true)
+        .action(gtk::FileChooserAction::Open)
         .build();
 
     if let Some(dir) = folder {
@@ -1187,6 +1186,7 @@ fn open_rom_chooser<F>(
     });
 
     OPEN_CHOOSERS.with(|c| c.borrow_mut().push(dialog.clone()));
+    log::info!("opening game file chooser for {title}");
     dialog.show();
 }
 

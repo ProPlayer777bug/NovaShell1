@@ -112,6 +112,16 @@
   #tabs button:hover { color: var(--text); background: rgba(255,255,255,0.05); }
   #tabs button.active { color: #fff; background: rgba(var(--accent-rgb), 0.82); box-shadow: 0 0 0.8rem rgba(var(--accent-rgb), 0.4); }
 
+  #backbtn {
+    background: var(--panel); border: 1px solid var(--line); color: var(--text);
+    font: inherit; font-weight: 700; letter-spacing: 0.06em; font-size: 0.85rem;
+    padding: 0.5rem 1rem; border-radius: 999px; cursor: pointer;
+    display: flex; align-items: center; gap: 0.4rem; white-space: nowrap;
+    transition: border-color .15s, background .15s, color .15s;
+  }
+  #backbtn:hover { border-color: var(--accent); color: #fff; }
+  #backbtn.focused { border-color: var(--accent); color: #fff; box-shadow: 0 0 0 2px var(--accent); }
+
   #clockwrap { display: flex; flex-direction: column; align-items: flex-end; gap: 0.1rem; }
   #clockwrap .time { font-size: 1rem; font-weight: 700; letter-spacing: 0.04em; }
   #clockwrap .date { font-size: 0.72rem; color: var(--text-dim); }
@@ -451,6 +461,7 @@
       <div class="mark">N</div>
       <span>NovaShell</span>
     </div>
+    <button id="backbtn" title="Back to Home (Esc)" data-x="-2" data-y="-2" data-action="go-home">← Home</button>
     <nav id="tabs">
       <button data-tab="home" class="active">Home</button>
       <button data-tab="library">Library</button>
@@ -781,6 +792,9 @@ function runAction(action, el) {
     case "tab":
       setTab(el.dataset.tab);
       break;
+    case "go-home":
+      goHome();
+      break;
     case "filter":
       state.filter = el.dataset.filter;
       renderLibrary(true);
@@ -1023,6 +1037,17 @@ function renderSearch(q, done) {
 
 let searchRow = 0;
 function moveSearch(d) { renderSearch($("#search-input").value); }
+
+function goHome() {
+  // Close anything open and return to the home screen from anywhere.
+  stopRomWatch();
+  closeSearch();
+  closeQuick();
+  closeRomPicker();
+  setTab("home");
+  window.scrollTo({ top: 0, behavior: "auto" });
+  sfx.back();
+}
 
 /* --------------------------- ROM picker ------------------------------ */
 const romState = { game: null, path: "", ext: {}, sig: "" };
