@@ -81,6 +81,9 @@ pub fn configure_graphics_backend() {
         ("GSK_RENDERER", "cairo"),
         ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
         ("WEBKIT_FORCE_SANDBOX", "0"),
+        // Qt-based titles (PCSX2, Dolphin) try a wayland platform plugin that
+        // does not exist here; point them at the X11 backend we actually run.
+        ("QT_QPA_PLATFORM", "xcb"),
         // Force mesa onto llvmpipe so the d3d12/zink paths can never crash.
         ("LIBGL_ALWAYS_SOFTWARE", "1"),
         ("GALLIUM_DRIVER", "llvmpipe"),
@@ -929,14 +932,35 @@ fn launch_spec(state: &AppState, spec: &Spec, library_id: Option<&str>) -> Resul
         });
     }
     send_event(state, json!({ "event": "game_start", "title": title }));
-    if state.opts.fullscreen && !state.opts.windowed {
-        state.window.set_visible(false);
-    }
 
     let sender = state.sender.clone();
+    let hide_mode = state.opts.fullscreen && !state.opts.windowed;
+
+    // Wait for the child. If it dies within the first ~1.4s (e.g. a Qt app
+    // that cannot find its backend), tell the UI it failed so the shell comes
+    // straight back instead of leaving a blank fullscreen.
     std::thread::spawn(move || {
         let start = Instant::now();
         let mut child = child;
+        std::thread::sleep(Duration::from_millis(1400));
+        let took = start.elapsed().as_secs();
+        let early_exit = if let Ok(Some(status)) = child.try_wait() {
+            Some(status.code())
+        } else {
+            None
+        };
+        if let Some(code) = early_exit {
+            if hide_mode {
+                let _ = sender.send(
+                    json!({ "event": "_launch_failed", "_internal": true, "title": title, "code": code })
+                        .to_string(),
+                );
+            }
+        } else if hide_mode {
+            let _ = sender.send(
+                json!({ "event": "_launch_hide", "_internal": true, "title": title }).to_string(),
+            );
+        }
         let _ = child.wait();
         let secs = start.elapsed().as_secs();
         let msg = json!({
@@ -947,6 +971,7 @@ fn launch_spec(state: &AppState, spec: &Spec, library_id: Option<&str>) -> Resul
         })
         .to_string();
         let _ = sender.send(msg);
+        let _ = took;
     });
     Ok(())
 }
@@ -957,6 +982,22 @@ fn launch_spec(state: &AppState, spec: &Spec, library_id: Option<&str>) -> Resul
 
 fn handle_core_event(state: &AppState, v: &Value) {
     // Internal side effects first.
+    if v.get("_internal").and_then(|x| x.as_bool()).unwrap_or(false)
+        && v["event"].as_str() == Some("_launch_hide")
+    {
+        if state.opts.fullscreen && !state.opts.windowed {
+            state.window.set_visible(false);
+        }
+    }
+    if v.get("_internal").and_then(|x| x.as_bool()).unwrap_or(false)
+        && v["event"].as_str() == Some("_launch_failed")
+    {
+        if state.opts.fullscreen && !state.opts.windowed {
+            state.window.present();
+            state.window.fullscreen();
+        }
+        log::warn!("{} exited on start (code {:?})", v["title"].as_str().unwrap_or("?"), v["code"].as_i64());
+    }
     if v.get("_internal").and_then(|x| x.as_bool()).unwrap_or(false)
         && v["event"].as_str() == Some("_install_done")
     {

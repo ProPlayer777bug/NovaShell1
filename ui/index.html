@@ -669,6 +669,9 @@ function handleEvent(msg) {
         toast("Install failed: " + (msg.error || "unknown"), "warn");
       }
       break;
+    case "_launch_failed":
+      toast((msg.title || "That app") + " failed to start", "warn");
+      break;
   }
 }
 
@@ -1518,6 +1521,13 @@ document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("mousedown", (e) => {
     const f = e.target.closest("[data-x][data-y]");
     if (f) { focus(f, false); }
+  });
+  // Mouse clicks anywhere act like pressing the focused action. The quick
+  // menu and ROM overlay already handle their own clicks, so skip those.
+  document.addEventListener("click", (e) => {
+    if (e.target.closest("#quickmenu") || e.target.closest("#rom-ov")) return;
+    const el = e.target.closest("[data-action]");
+    if (el && el.dataset.action !== "set") runAction(el.dataset.action, el);
   });
   $("#quickmenu").addEventListener("click", (e) => {
     const el = e.target.closest("[data-action]");
