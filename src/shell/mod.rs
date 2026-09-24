@@ -257,6 +257,9 @@ pub fn watchdog(opts: &RunOptions) -> Result<()> {
 pub struct RunningSession {
     id: String,
     title: String,
+    /// PID of the launched process group leader, so closing the shell can take
+    /// the running app down with it instead of leaving it orphaned.
+    pid: u32,
 }
 
 struct AppState {
@@ -272,10 +275,11 @@ struct AppState {
     opts: RunOptions,
 }
 
-/// Window size for windowed mode: the monitor minus headroom for the window
-/// frame WSLg adds. Sizing to the exact monitor area makes the frame push the
-/// window off-screen (it mapped at +38+59 on a 1920x1200 display), which looks
-/// like the shell never launched at all.
+/// Window size for windowed mode. Clamped to the monitor minus frame headroom
+/// and to 1440x860 absolute: the Windows desktop here is 1536x960 logical
+/// (1920x1200 physical at 125% scaling) while WSLg's X root reports
+/// 1920x1200, so a window sized to the full X root can land outside the
+/// visible desktop and show nothing but a taskbar entry.
 fn fitted_window_size() -> (i32, i32) {
     let (mut w, mut h) = (1280, 720);
     if let Some(disp) = gtk::gdk::Display::default() {
@@ -291,7 +295,29 @@ fn fitted_window_size() -> (i32, i32) {
             h = (g.height() - 120).max(480);
         }
     }
-    (w, h)
+    (w.min(1440), h.min(860))
+}
+
+/// Terminate the app this shell launched (if any). Launched apps get their own
+/// process group, so signalling the negated pid reaches every child process
+/// (a browser's renderer/helper processes included). Without this, quitting
+/// NovaShell left Brave (and its whole process tree) running forever.
+fn terminate_running(state: &AppState) {
+    let running = state.running.borrow_mut().take();
+    if let Some(r) = running {
+        if r.pid == 0 {
+            return;
+        }
+        log::info!("closing launched app: {} (pid {})", r.title, r.pid);
+        #[cfg(unix)]
+        {
+            let _ = std::process::Command::new("kill")
+                .arg(format!("-{}", r.pid))
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
 }
 
 /// Bring the shell window back on screen, re-applying the fitted size so it
@@ -328,9 +354,14 @@ pub fn run(opts: RunOptions) -> Result<()> {
     gtk::init().map_err(|e| anyhow!("GTK init failed (is a display available?): {e}"))?;
     eprintln!("NovaShell: gtk init ok");
     let main_loop = glib::MainLoop::new(None, false);
-    activate(&main_loop, &opts)?;
+    let state_slot = activate(&main_loop, &opts)?;
     eprintln!("NovaShell: window presented, entering main loop");
     main_loop.run();
+    // Quitting the shell must not leave a launched app (and its helper
+    // processes) running; take the whole process group down with us.
+    if let Some(state) = state_slot.borrow().as_ref() {
+        terminate_running(state);
+    }
     Ok(())
 }
 
@@ -344,7 +375,10 @@ fn print_help() {
     eprintln!("  --watchdog     supervise the shell and restart on crash");
 }
 
-fn activate(main_loop: &glib::MainLoop, opts: &RunOptions) -> Result<()> {
+fn activate(
+    main_loop: &glib::MainLoop,
+    opts: &RunOptions,
+) -> Result<Rc<RefCell<Option<AppState>>>> {
     log::debug!("building NovaShell UI…");
     let cfg = Config::load();
 
@@ -523,7 +557,7 @@ window.present();
         main_loop: main_loop.clone(),
         opts: opts.clone(),
     });
-    Ok(())
+    Ok(state_slot)
 }
 
 /// UI document from `ui/index.html`, overridable with `NOVASHELL_UI`.
@@ -982,10 +1016,14 @@ fn console_polish(program: &str) -> Vec<String> {
             .to_string_lossy()
             .to_string();
         vec![
-            "--new-window".into(),
+            // Kiosk = no tab strip, no address bar, no chrome: a dedicated
+            // full-screen "app" window, the way a console opens a title.
+            "--kiosk".into(),
             "--start-fullscreen".into(),
             "--no-first-run".into(),
             "--no-default-browser-check".into(),
+            // A private profile guarantees its own window instead of opening
+            // a tab inside an already-running browser instance.
             format!("--user-data-dir={dir}"),
         ]
     };
@@ -1005,11 +1043,13 @@ fn launch_spec(state: &AppState, spec: &Spec, library_id: Option<&str>) -> Resul
     log::info!("launching: {}", spec.name);
     let child = crate::launcher::spawn(spec)?;
     let title = spec.name.clone();
+    let pid = child.id();
     {
         let mut running = state.running.borrow_mut();
         *running = Some(RunningSession {
             id: library_id.unwrap_or_default().to_string(),
             title: title.clone(),
+            pid,
         });
     }
     send_event(state, json!({ "event": "game_start", "title": title }));
