@@ -96,6 +96,17 @@ pub fn configure_graphics_backend() {
             std::env::set_var(key, value);
         }
     }
+    // Without an X settings daemon, X11 apps (Brave, Qt emulators) fall back
+    // to an empty cursor unless the search path is explicit.
+    if std::env::var_os("XCURSOR_PATH").is_none() {
+        let icons_home = dirs::home_dir()
+            .map(|h| h.join(".icons").to_string_lossy().into_owned())
+            .unwrap_or_default();
+        std::env::set_var(
+            "XCURSOR_PATH",
+            format!("/usr/share/icons:{icons_home}:/usr/share/pixmaps:"),
+        );
+    }
 }
 
 pub fn parse_args() -> RunOptions {

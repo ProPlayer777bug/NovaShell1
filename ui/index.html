@@ -15,13 +15,13 @@
   * { cursor: none; }
   #nova-cursor {
     display: none; position: fixed; left: 0; top: 0; width: 0; height: 0;
-    pointer-events: none; z-index: 99999;
+    pointer-events: none; z-index: 99999; will-change: transform;
   }
   #nova-cursor::before {
     content: ""; display: block; width: 14px; height: 14px;
-    margin-left: -2px; margin-top: -2px; border-radius: 50%;
+    transform: translate(-7px, -7px); border-radius: 50%;
     background: var(--accent2); border: 2px solid #fff;
-    box-shadow: 0 0 8px rgba(0,0,0,0.7);
+    box-shadow: 0 0 6px rgba(0,0,0,0.55);
   }
   :root {
     --accent: #7c3aed;
@@ -1519,11 +1519,12 @@ document.addEventListener("DOMContentLoaded", () => {
   // Drawn pointer: WSLg's WebKit never renders the native X cursor, so a
   // fixed overlay dot follows the mouse instead.
   const ncur = document.getElementById("nova-cursor");
-  document.addEventListener("mousemove", (e) => {
+  const moveNovaCursor = (e) => {
     if (ncur.style.display !== "block") ncur.style.display = "block";
-    ncur.style.left = e.clientX + "px";
-    ncur.style.top = e.clientY + "px";
-  });
+    ncur.style.transform = "translate(" + e.clientX + "px," + e.clientY + "px)";
+  };
+  document.addEventListener("mousemove", moveNovaCursor);
+  document.addEventListener("pointermove", moveNovaCursor);
   // Mouse nav: hovering focuses, clicking confirms.
   document.addEventListener("mousedown", (e) => {
     const f = e.target.closest("[data-x][data-y]");
