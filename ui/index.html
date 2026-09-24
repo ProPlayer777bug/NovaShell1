@@ -11,19 +11,7 @@
      Scaling is rem-driven so the whole UI adapts to any resolution
      (1080p / 4K) through the config ui_scale value.
      ============================================================= */
-  html, body { cursor: none; }
-  * { cursor: none; }
-  #nova-cursor {
-    display: none; position: fixed; left: 0; top: 0; width: 0; height: 0;
-    pointer-events: none; z-index: 99999; will-change: transform;
-  }
-  #nova-cursor::before {
-    content: ""; display: block; width: 14px; height: 14px;
-    transform: translate(-7px, -7px); border-radius: 50%;
-    background: var(--accent2); border: 2px solid #fff;
-    box-shadow: 0 0 6px rgba(0,0,0,0.55);
-  }
-  :root {
+    :root {
     --accent: #7c3aed;
     --accent-rgb: 124, 58, 237;
     --accent2: #22d3ee;
@@ -569,7 +557,6 @@
   <div class="overlay" id="hidden-close" tabindex="-1" style="display:none"></div>
 </div>
 
-<div id="nova-cursor" aria-hidden="true"></div>
   <script>
 "use strict";
 
@@ -1516,15 +1503,6 @@ document.addEventListener("DOMContentLoaded", () => {
   $$("#tabs button").forEach((b) => b.addEventListener("click", () => setTab(b.dataset.tab)));
   $("#searchbtn").addEventListener("click", openSearch);
   $("#quickbtn").addEventListener("click", toggleQuick);
-  // Drawn pointer: WSLg's WebKit never renders the native X cursor, so a
-  // fixed overlay dot follows the mouse instead.
-  const ncur = document.getElementById("nova-cursor");
-  const moveNovaCursor = (e) => {
-    if (ncur.style.display !== "block") ncur.style.display = "block";
-    ncur.style.transform = "translate(" + e.clientX + "px," + e.clientY + "px)";
-  };
-  document.addEventListener("mousemove", moveNovaCursor);
-  document.addEventListener("pointermove", moveNovaCursor);
   // Mouse nav: hovering focuses, clicking confirms.
   document.addEventListener("mousedown", (e) => {
     const f = e.target.closest("[data-x][data-y]");
