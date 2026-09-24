@@ -40,17 +40,26 @@ pub struct RunOptions {
 /// On real desktops (no `/mnt/wslg`) we leave rendering alone (full GPU).
 /// All settings respect an explicit user-supplied env override.
 pub fn configure_graphics_backend() {
-    if !std::path::Path::new("/mnt/wslg").exists()
-        || std::env::var_os("WSL_INTEROP").is_none()
-    {
+    let is_wsl = std::path::Path::new("/mnt/wslg").exists()
+        || std::env::var_os("WSL_DISTRO_NAME").is_some()
+        || std::env::var_os("WSL_INTEROP").is_some();
+    if !is_wsl {
         return;
     }
-    eprintln!("NovaShell: WSLg detected — using X11 + software rendering fallback");
+    // WSLg is up whenever /mnt/wslg is mounted; some shells/services do not
+    // export DISPLAY even though the socket exists.
+    if std::env::var_os("DISPLAY").is_none() && std::path::Path::new("/mnt/wslg").exists() {
+        std::env::set_var("DISPLAY", ":0");
+    }
+    eprintln!("NovaShell: WSL detected — using X11 + software rendering fallback");
     for (key, value) in [
         ("GDK_BACKEND", "x11"),
         ("GSK_RENDERER", "cairo"),
         ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
         ("WEBKIT_FORCE_SANDBOX", "0"),
+        // Force mesa onto llvmpipe so the d3d12/zink paths can never crash.
+        ("LIBGL_ALWAYS_SOFTWARE", "1"),
+        ("GALLIUM_DRIVER", "llvmpipe"),
     ] {
         if std::env::var_os(key).is_none() {
             std::env::set_var(key, value);
