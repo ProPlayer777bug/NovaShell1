@@ -27,6 +27,7 @@ pub struct RunOptions {
     pub windowed: bool,
     pub debug: bool,
     pub watchdog: bool,
+    pub help: bool,
 }
 
 pub fn parse_args() -> RunOptions {
@@ -35,18 +36,11 @@ pub fn parse_args() -> RunOptions {
         windowed: false,
         debug: false,
         watchdog: false,
+        help: false,
     };
     for a in std::env::args().skip(1) {
         match a.as_str() {
-            "-h" | "--help" => {
-                eprintln!("NovaShell — console-style desktop shell for Ubuntu");
-                eprintln!();
-                eprintln!("  --fullscreen   start borderless fullscreen (default)");
-                eprintln!("  --windowed     run in a windowed mode (dev)");
-                eprintln!("  --dev          alias for --windowed");
-                eprintln!("  --debug        verbose logging to stderr + log file");
-                eprintln!("  --watchdog     supervise the shell and restart on crash");
-            }
+            "-h" | "--help" => o.help = true,
             "--fullscreen" => o.fullscreen = true,
             "-w" | "--windowed" | "--dev" => {
                 o.fullscreen = false;
@@ -187,14 +181,14 @@ pub struct RunningSession {
 
 struct AppState {
     webview: webkit6::WebView,
-    window: gtk::ApplicationWindow,
-    app: gtk::Application,
+    window: gtk::Window,
     config: Rc<RefCell<Config>>,
     library: Rc<RefCell<Library>>,
     cpu: Rc<RefCell<CpuSampler>>,
     controllers: Arc<Mutex<Vec<ControllerInfo>>>,
     sender: mpsc::Sender<String>,
     running: Rc<RefCell<Option<RunningSession>>>,
+    main_loop: glib::MainLoop,
     opts: RunOptions,
 }
 
@@ -203,22 +197,29 @@ pub fn run(opts: RunOptions) -> Result<()> {
     install_panic_hook();
     util::ensure_dirs().context("creating data directories")?;
 
+    if opts.help {
+        print_help();
+        return Ok(());
+    }
+
     gtk::init().map_err(|e| anyhow!("GTK init failed: {e}"))?;
-    let app = gtk::Application::builder()
-        .application_id("org.novashell.Shell")
-        .build();
-    app.connect_activate(move |app| {
-        if let Err(e) = activate(app, &opts) {
-            log::error!("failed to build shell: {e:#}");
-            std::process::exit(2);
-        }
-    });
-    let code = app.run();
-    log::info!("shell exited with code {}", i32::from(code));
-    std::process::exit(code.into())
+    let main_loop = glib::MainLoop::new(None, false);
+    activate(&main_loop, &opts)?;
+    main_loop.run();
+    Ok(())
 }
 
-fn activate(app: &gtk::Application, opts: &RunOptions) -> Result<()> {
+fn print_help() {
+    eprintln!("NovaShell — console-style desktop shell for Ubuntu");
+    eprintln!();
+    eprintln!("  --fullscreen   start borderless fullscreen (default)");
+    eprintln!("  --windowed     run in a windowed mode (dev)");
+    eprintln!("  --dev          alias for --windowed");
+    eprintln!("  --debug        verbose logging to stderr + log file");
+    eprintln!("  --watchdog     supervise the shell and restart on crash");
+}
+
+fn activate(main_loop: &glib::MainLoop, opts: &RunOptions) -> Result<()> {
     log::debug!("building NovaShell UI…");
     let cfg = Config::load();
 
@@ -266,8 +267,7 @@ fn activate(app: &gtk::Application, opts: &RunOptions) -> Result<()> {
         }
     }
 
-    let window = gtk::ApplicationWindow::builder()
-        .application(app)
+    let window = gtk::Window::builder()
         .title("NovaShell")
         .default_width(1920)
         .default_height(1080)
@@ -278,7 +278,14 @@ fn activate(app: &gtk::Application, opts: &RunOptions) -> Result<()> {
     } else {
         window.maximize();
     }
-    window.present();
+window.present();
+    {
+        let close_loop = main_loop.clone();
+        window.connect_close_request(move |_win| {
+            close_loop.quit();
+            glib::Propagation::Proceed
+        });
+    }
 
     // Core event bus (Rust threads -> main context -> UI).
     let (sender, receiver) = mpsc::channel::<String>();
@@ -359,13 +366,13 @@ fn activate(app: &gtk::Application, opts: &RunOptions) -> Result<()> {
     *state_slot.borrow_mut() = Some(AppState {
         webview,
         window,
-        app: app.clone(),
         config: Rc::new(RefCell::new(cfg)),
         library: Rc::new(RefCell::new(library)),
         cpu: Rc::new(RefCell::new(CpuSampler::new())),
         controllers,
         sender,
         running: Rc::new(RefCell::new(None)),
+        main_loop: main_loop.clone(),
         opts: opts.clone(),
     });
     Ok(())
@@ -460,7 +467,7 @@ fn route(state: &AppState, msg: Value) {
             match action {
                 "desktop" | "quit" => {
                     log::info!("returning to desktop (exiting shell)");
-                    state.app.quit();
+                    state.main_loop.quit();
                 }
                 _ => {
                     let res = system_power(action);
@@ -495,7 +502,7 @@ fn route(state: &AppState, msg: Value) {
         "echo" => reply(state, id, msg.clone()),
         "shutdown" => {
             // Dev/crash handling: clean exit so the watchdog can restart.
-            state.app.quit();
+            state.main_loop.quit();
             state.window.close();
         }
         _ => log::warn!("unknown cmd '{cmd}'"),
