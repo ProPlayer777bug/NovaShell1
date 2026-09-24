@@ -450,7 +450,8 @@ fn route(state: &AppState, msg: Value) {
 
         "game:launch" => {
             let game_id = msg["id"].as_str().unwrap_or("");
-            launch_by_id(state, game_id, id);
+            let rom = msg["rom"].as_str();
+            launch_by_id(state, game_id, rom, id);
         }
 
         "app:launch" => {
@@ -463,6 +464,15 @@ fn route(state: &AppState, msg: Value) {
             let spec = Spec::new(name, program).args(args);
             match launch_spec(state, &spec, None) {
                 Ok(()) => reply(state, id, json!({ "ok": true })),
+                Err(e) => reply(state, id, json!({ "ok": false, "error": e.to_string() })),
+            }
+        }
+
+        "files:list" => {
+            let path = msg["path"].as_str().unwrap_or("").to_string();
+            let out = list_folder(&path);
+            match out {
+                Ok(v) => reply(state, id, json!({ "ok": true, "folder": v })),
                 Err(e) => reply(state, id, json!({ "ok": false, "error": e.to_string() })),
             }
         }
@@ -593,6 +603,8 @@ fn game_json(g: &Game) -> Value {
         "id": g.id,
         "title": g.title,
         "source": g.source,
+        "platform": g.platform,
+        "rom_exts": g.rom_exts,
         "favicon": g.icon.as_ref().map(|p| p.to_string_lossy().to_string()),
         "artwork": g.artwork.as_ref().map(|p| p.to_string_lossy().to_string()),
         "last_played": g.last_played.filter(|t| *t > 0),
@@ -665,7 +677,59 @@ fn settings_set(state: &AppState, msg: &Value) {
 // Launches
 // ---------------------------------------------------------------------------
 
-fn launch_by_id(state: &AppState, game_id: &str, id: &str) {
+/// List a directory for the UI's ROM/file browser. Defaults to the user's
+/// home dir when `path` is empty or missing.
+fn list_folder(path: &str) -> Result<Value> {
+    let start = if path.trim().is_empty() {
+        dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"))
+    } else {
+        std::path::PathBuf::from(path.trim())
+    };
+    let start = start.canonicalize().map_err(|e| anyhow!("bad folder: {e}"))?;
+    if !start.is_dir() {
+        return Err(anyhow!("not a directory"));
+    }
+    let parent = start
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let read = std::fs::read_dir(&start).map_err(|e| anyhow!("cannot read: {e}"))?;
+
+    let mut dirs: Vec<Value> = Vec::new();
+    let mut files: Vec<Value> = Vec::new();
+    for entry in read.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue; // skip hidden
+        }
+        let p = entry.path();
+        let is_dir = p.is_dir();
+        if !is_dir && !p.is_file() {
+            continue;
+        }
+        let item = json!({
+            "name": name,
+            "path": p.to_string_lossy().to_string(),
+            "is_dir": is_dir,
+        });
+        if is_dir {
+            dirs.push(item);
+        } else {
+            files.push(item);
+        }
+    }
+    dirs.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    files.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    dirs.extend(files);
+
+    Ok(json!({
+        "path": start.to_string_lossy().to_string(),
+        "parent": parent,
+        "entries": dirs,
+    }))
+}
+
+fn launch_by_id(state: &AppState, game_id: &str, rom: Option<&str>, id: &str) {
     let game = match state.library.borrow().get(game_id) {
         Some(g) => g.clone(),
         None => {
@@ -678,10 +742,23 @@ fn launch_by_id(state: &AppState, game_id: &str, id: &str) {
         return;
     }
     let steam_bin = integrations::steam::steam_binary();
-    let Some(spec) = game.launch.to_spec(&game.title, steam_bin.as_deref()) else {
-        reply(state, id, json!({ "ok": false, "error": "not launchable" }));
-        return;
+    let mut spec = match game.launch.to_spec(&game.title, steam_bin.as_deref()) {
+        Some(s) => s,
+        None => {
+            reply(state, id, json!({ "ok": false, "error": "not launchable" }));
+            return;
+        }
     };
+    if let Some(rom) = rom {
+        if !rom.is_empty() {
+            if !std::path::Path::new(rom).exists() {
+                reply(state, id, json!({ "ok": false, "error": "ROM not found" }));
+                return;
+            }
+            spec = spec.arg(rom);
+            log::info!("{} (rom: {rom})", game.title);
+        }
+    }
     match launch_spec(state, &spec, Some(game_id)) {
         Ok(()) => {
             let _ = state.library.borrow_mut().record_launch(game_id);

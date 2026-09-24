@@ -354,6 +354,28 @@
   }
   #search-results { margin-top: 1.2rem; width: min(44rem, 92vw); display: grid; grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr)); gap: 0.9rem; max-height: 60vh; overflow-y: auto; }
 
+  #rom-ov .rom-picker {
+    width: min(52rem, 94vw); max-height: 84vh;
+    background: var(--panel-solid); border: 1px solid var(--line-strong);
+    border-radius: 1.1rem; padding: 1.4rem;
+    display: flex; flex-direction: column;
+  }
+  #rom-ov .rom-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 0.9rem; }
+  #rom-ov .rom-title { font-size: 1.15rem; font-weight: 600; color: var(--text); }
+  #rom-ov .rom-path { font-family: var(--mono); font-size: 0.8rem; color: var(--text-dim); word-break: break-all; }
+  #rom-ov #rom-list { display: flex; flex-direction: column; gap: 0.4rem; overflow-y: auto; max-height: 58vh; padding-right: 0.3rem; }
+  #rom-ov .rom-item {
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.6rem 0.8rem; border-radius: 0.55rem; cursor: pointer;
+    background: rgba(255,255,255,0.02); border: 1px solid transparent;
+    color: var(--text);
+  }
+  #rom-ov .rom-item .kind { font-size: 0.72rem; opacity: 0.6; margin-left: auto; font-family: var(--mono); }
+  #rom-ov .rom-item .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #rom-ov .rom-item.focused { box-shadow: 0 0 0 2px var(--accent); background: rgba(var(--accent-rgb),0.12); }
+  #rom-ov .rom-empty { color: var(--text-dim); padding: 1.2rem 0.6rem; text-align: center; }
+  #rom-ov .rom-hint { color: var(--text-dim); font-size: 0.8rem; margin-top: 0.9rem; }
+
   #playing {
     position: absolute; inset: 0; z-index: 50;
     background:
@@ -465,6 +487,8 @@
         <button data-filter="steam">Steam</button>
         <button data-filter="heroic">Heroic</button>
         <button data-filter="desktop">Native</button>
+        <button data-filter="apps">Apps</button>
+        <button data-filter="emulators">Emulators</button>
         <button data-filter="manual">Manual</button>
       </div>
       <div class="grid wide" id="lib-grid"></div>
@@ -500,6 +524,20 @@
         <input id="search-input" type="text" placeholder="Type a game name…" autocomplete="off">
       </div>
       <div id="search-results"></div>
+    </div>
+  </div>
+
+  <div class="overlay" id="rom-ov">
+    <div class="rom-picker">
+      <div class="rom-head">
+        <div>
+          <div class="rom-title" id="rom-title">Pick a game file</div>
+          <div class="rom-path" id="rom-path">…</div>
+        </div>
+        <button class="btn ghost" data-x="9" data-y="0" data-action="rom-close">✕</button>
+      </div>
+      <div id="rom-list"></div>
+      <div class="rom-hint" id="rom-hint">Pick a ROM to boot, or go up a folder.</div>
     </div>
   </div>
 
@@ -561,12 +599,12 @@ function mockReply(cmd, id) {
       ok: true, version: "dev-mock",
       config: state.config,
       library: {
-        games: mockGames(),
+        games: [],
       },
       status: { cpu_usage_percent: 12, mem_percent: 38, network_up: true, controllers: [] },
       identity: { user: "developer", host: "novashell-dev" },
     }),
-    "library:refresh": () => ({ ok: true, games: mockGames() }),
+    "library:refresh": () => ({ ok: true, games: [] }),
     "settings:get": () => ({ config: state.config }),
     "system:status": () => ({ cpu_usage_percent: 12, mem_percent: 38, network_up: true, controllers: [] }),
     "controller:list": () => ({ controllers: [] }),
@@ -578,20 +616,6 @@ function mockReply(cmd, id) {
   const handler = builtins[cmd];
   if (handler) p.resolve(handler());
   else p.resolve({ ok: true, [cmd.replace(/[^a-z]/g, "_")]: [] });
-}
-
-function mockGames() {
-  const names = ["Nova Rift", "Dustbound", "Solar Canvas", "Pulse\\: Runner", "Astral Loom", "Cinder Groves", "Zero Signal", "Lumen Edge"];
-  const sources = ["steam", "heroic", "desktop", "manual"];
-  return names.map((name, i) => ({
-    id: (sources[i % 4]) + "-" + i,
-    title: name,
-    source: sources[i % 4],
-    icon: null, artwork: null,
-    last_played: i === 0 ? Date.now() / 1000 : Math.max(0, Date.now() / 1000 - i * 86400 * 3),
-    playtime: (i * 7 % 40) + " m", playtime_secs: i * 420,
-    favorite: i % 2 === 0, installed: true,
-  }));
 }
 
 /* Rust -> JS dispatcher. */
@@ -729,6 +753,7 @@ function confirm() {
 function back() {
   if (nav.current && nav.current.hasAttribute("data-active-slider")) { exitSlider(); return; }
   if (quickOpen()) { closeQuick(); return; }
+  if (romOpen()) { closeRomPicker(); return; }
   if (searchOpen()) { closeSearch(); return; }
   if (state.playing) { return; }
   if (state.tab !== "home") { setTab("home"); return; }
@@ -747,6 +772,13 @@ function runAction(action, el) {
       break;
     case "launch":
       launchGame(el.dataset.gid);
+      break;
+    case "rom-dir":
+    case "rom-file":
+      romEnter(el);
+      break;
+    case "rom-close":
+      closeRomPicker();
       break;
     case "toggle-fav":
       toggleFavorite(el.dataset.gid, el);
@@ -777,6 +809,7 @@ function runAction(action, el) {
 function launchGame(id) {
   const game = state.library.find((g) => g.id === id);
   if (!game) return;
+  if (game.source === "emulator") { openRomPicker(game); return; }
   toast("Launching " + game.title + " …");
   post("game:launch", { id }).then((r) => {
     if (r && r.ok === false) toast(r.error || "Failed to launch", "warn");
@@ -961,6 +994,93 @@ function renderSearch(q, done) {
 let searchRow = 0;
 function moveSearch(d) { renderSearch($("#search-input").value); }
 
+/* --------------------------- ROM picker ------------------------------ */
+const romState = { game: null, path: "", ext: {} };
+function romOpen() { return $("#rom-ov").classList.contains("open"); }
+
+function openRomPicker(game) {
+  romState.game = game;
+  romState.ext = {};
+  (game.rom_exts || []).forEach((e) => (romState.ext[e.toLowerCase()] = true));
+  $("#rom-ov").classList.add("open");
+  $("#rom-title").textContent = game.title;
+  romGo((game.rom_dir) || "");
+  sfx.ok();
+}
+function closeRomPicker() {
+  $("#rom-ov").classList.remove("open");
+  romState.game = null;
+  renderRoms("", true);
+  reindexCurrent();
+  sfx.back();
+}
+
+function romKind(name) {
+  const e = (name.split(".").pop() || "").toLowerCase();
+  return romState.ext[e] ? e : null;
+}
+
+function romGo(path) {
+  if (path === "" && romState.path === "") { closeRomPicker(); return; }
+  post("files:list", { path: path || "" }).then((r) => {
+    if (!r || !r.ok) { toast((r && r.error) || "Cannot read that folder", "warn"); return; }
+    romState.path = r.folder.path;
+    renderRoms(r);
+  });
+}
+
+function renderRoms(r, done) {
+  const box = $("#rom-list");
+  if (done) { box.innerHTML = ""; return; }
+  const folder = r.folder;
+  const rows = [];
+  if (folder.parent) {
+    rows.push(romItem("↑  Go up", folder.parent, false, false, rows.length));
+  }
+  const items = folder.entries || [];
+  const dirs = items.filter((e) => e.is_dir);
+  const files = items.filter((e) => !e.is_dir && romKind(e.name));
+  const others = items.filter((e) => !e.is_dir && !romKind(e.name));
+  const show = dirs.concat(files, others.slice(0, 25));
+  if (!show.length) {
+    box.innerHTML = '<div class="rom-empty">No folders or compatible game files here.</div>';
+    $("#rom-path").textContent = folder.path;
+    $("#rom-hint").textContent = "Try a different folder.";
+    return;
+  }
+  show.forEach((e) => rows.push(romItem(e.name, e.path, e.is_dir, !e.is_dir, rows.length)));
+  box.innerHTML = rows.join("");
+  $("#rom-path").textContent = folder.path;
+  $("#rom-hint").textContent = "Pick a game file to boot it with " + (romState.game.title || "the emulator") + ".";
+  const first = box.querySelector("[data-x][data-y]");
+  if (first) { indexFocus(box); focus(first); }
+}
+
+function romItem(name, path, isDir, isFile, y) {
+  const ext = romKind(name);
+  const kind = isDir ? "DIR" : (ext ? ext.toUpperCase() : "FILE");
+  const icn = isDir ? ic("folder") : ic("rocket");
+  return '<div class="rom-item" data-x="0" data-y="' + (y || 0) + '" data-action="' + (isDir ? "rom-dir" : "rom-file") + '" data-path="' + esc(path) + '">' +
+    icn + '<span class="nm">' + esc(name) + '</span><span class="kind">' + kind + "</span></div>";
+}
+
+function romEnter(el) {
+  const action = el.dataset.action;
+  const path = el.dataset.path;
+  if (action === "rom-dir") romGo(path);
+  else if (action === "rom-file") launchRom(el, path);
+}
+
+function launchRom(el, path) {
+  const game = romState.game;
+  if (!game) return;
+  toast("Booting " + game.title + " with " + path.split("/").pop());
+  post("game:launch", { id: game.id, rom: path }).then((r) => {
+    if (r && r.ok === false) toast(r.error || "Failed to launch", "warn");
+    closeRomPicker();
+  });
+}
+
 /* ------------------------------ Quick menu --------------------------- */
 function toggleQuick() {
   const qm = $("#quickmenu");
@@ -1095,19 +1215,22 @@ function ic(name) {
 
 /* ------------------------- Game card renderer ------------------------ */
 function gameCard(g, x, y) {
-  const src = { steam: "Steam", heroic: "Heroic", desktop: "Native", manual: "Manual" }[g.source] || g.source;
+  const src = { steam: "Steam", heroic: "Heroic", desktop: "Native", manual: "Manual", app: "App", emulator: g.platform || "Emulator" }[g.source] || g.source;
   const badge = (g.favorite ? '<span class="badge fav">' + ic("star").replace('width="18"', 'width="10"').replace('height="18"', 'height="10"') + '</span>' : "") + '<span class="badge">' + src + "</span>";
   const cover = g.artwork
     ? '<div class="cover"><img alt="" src="file://' + g.artwork + '"></div>'
     : (g.icon
       ? '<div class="cover" style="background:linear-gradient(135deg,#232a44,#141827)"><img alt="" src="file://' + g.icon + '"></div>'
       : '<div class="cover"><div class="ph">' + "◈" + "</div></div>");
+  const subtitle = (g.source === "emulator")
+    ? (g.platform ? "Boot a " + g.platform + " game" : "Pick a ROM")
+    : (g.playtime || "Never played");
   return (
     '<div class="card" data-x="' + x + '" data-y="' + y + '" data-action="launch" data-gid="' + g.id + '">' +
       '<div class="badges">' + badge + "</div>" +
       cover +
       '<div class="meta"><span class="title">' + esc(g.title) + "</span>" +
-      '<span class="subtitle">' + (g.playtime || "Never played") + "</span></div>" +
+      '<span class="subtitle">' + subtitle + "</span></div>" +
     "</div>"
   );
 }
@@ -1152,7 +1275,7 @@ function act(x, y, action, icon, label, hint) {
 /* ------------------------------ Library ------------------------------ */
 function renderLibrary(keepFocus) {
   const box = $("#lib-grid");
-  const filters = { all: true, favorites: (g) => g.favorite, steam: (g) => g.source === "steam", heroic: (g) => g.source === "heroic", desktop: (g) => g.source === "desktop", manual: (g) => g.source === "manual" };
+  const filters = { all: true, favorites: (g) => g.favorite, steam: (g) => g.source === "steam", heroic: (g) => g.source === "heroic", desktop: (g) => g.source === "desktop", apps: (g) => g.source === "app", emulators: (g) => g.source === "emulator", manual: (g) => g.source === "manual" };
   const f = filters[state.filter] || filters.all;
   const list = state.library.filter(f);
   $("#lib-count").textContent = list.length + " of " + state.library.length;
@@ -1336,7 +1459,7 @@ function renderAll() {
 /* ------------------------------ Boot --------------------------------- */
 async function boot() {
   const r = await post("boot");
-  if (!r || !r.config) { toast("Bridge unavailable — dev mock mode", "warn"); r.config = state.config; r.library = { games: mockGames() }; }
+  if (!r || !r.config) { toast("Bridge unavailable — dev mock mode", "warn"); r.config = state.config; r.library = { games: [] }; }
   state.config = Object.assign({}, state.config, r.config || {});
   state.library = (r.library && r.library.games) || [];
   state.status = r.status || {};
@@ -1369,6 +1492,10 @@ document.addEventListener("DOMContentLoaded", () => {
     if (f) { focus(f, false); }
   });
   $("#quickmenu").addEventListener("click", (e) => {
+    const el = e.target.closest("[data-action]");
+    if (el && el.dataset.action !== "set") runAction(el.dataset.action, el);
+  });
+  $("#rom-ov").addEventListener("click", (e) => {
     const el = e.target.closest("[data-action]");
     if (el && el.dataset.action !== "set") runAction(el.dataset.action, el);
   });

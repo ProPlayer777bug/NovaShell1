@@ -2,6 +2,7 @@
 //! returns library candidates. The shell merges them into the persistent
 //! library (preserving favorites/playtime). `plugins` orchestrates the scan.
 
+pub mod apps;
 pub mod desktop;
 pub mod heroic;
 pub mod steam;

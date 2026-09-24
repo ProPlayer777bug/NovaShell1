@@ -82,6 +82,12 @@ pub struct Game {
     pub favorite: bool,
     #[serde(default = "default_true")]
     pub installed: bool,
+    /// Console / device a curated app targets, e.g. "PS2" or "Wii".
+    #[serde(default)]
+    pub platform: Option<String>,
+    /// ROM file extensions this emulator tile can boot (empty for normal apps).
+    #[serde(default)]
+    pub rom_exts: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -305,6 +311,8 @@ mod tests {
             playtime_secs: 0,
             favorite: false,
             installed: true,
+            platform: None,
+            rom_exts: Vec::new(),
         }
     }
 

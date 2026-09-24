@@ -265,6 +265,8 @@ pub fn scan_steam_games(cfg: &Config) -> Vec<Game> {
                 playtime_secs: 0,
                 favorite: false,
                 installed,
+                platform: None,
+                rom_exts: Vec::new(),
             });
         }
     }

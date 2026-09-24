@@ -176,6 +176,22 @@ pub fn scan_desktop_games(cfg: &Config) -> Vec<Game> {
                 Some(x) => x,
                 None => continue,
             };
+            // Curated apps/emulators (browsers, file managers, emulators) are
+            // owned by the `apps` provider. Skip here only when the curated
+            // provider also resolves the binary, so flatpak/snap installs the
+            // PATH lookup misses still get a tile from the desktop scan.
+            if crate::integrations::apps::is_curated_bin(&program)
+                && crate::integrations::apps::find_bin(
+                    Path::new(&program)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                        .as_str(),
+                )
+                .is_some()
+            {
+                continue;
+            }
             out.push(Game {
                 id,
                 title: entry.name,
@@ -187,6 +203,8 @@ pub fn scan_desktop_games(cfg: &Config) -> Vec<Game> {
                 playtime_secs: 0,
                 favorite: false,
                 installed: true,
+                platform: None,
+                rom_exts: Vec::new(),
             });
         }
     }

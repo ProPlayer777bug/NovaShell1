@@ -15,6 +15,7 @@ pub fn providers() -> Vec<Box<dyn Provider>> {
     vec![
         Box::new(crate::integrations::steam::SteamProvider),
         Box::new(crate::integrations::heroic::HeroicProvider),
+        Box::new(crate::integrations::apps::AppsProvider),
         Box::new(crate::integrations::desktop::DesktopProvider),
     ]
 }
