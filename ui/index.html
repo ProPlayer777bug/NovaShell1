@@ -1012,12 +1012,38 @@ let searchRow = 0;
 function moveSearch(d) { renderSearch($("#search-input").value); }
 
 /* --------------------------- ROM picker ------------------------------ */
-const romState = { game: null, path: "", ext: {} };
+const romState = { game: null, path: "", ext: {}, sig: "" };
+let romWatch = null;
 function romOpen() { return $("#rom-ov").classList.contains("open"); }
+
+// Watch the current folder while the picker is open: when a game file shows
+// up (e.g. the user just dropped an .iso in from the file manager) refresh the
+// list and point it out, so selecting it is all that is left to do.
+function startRomWatch() {
+  stopRomWatch();
+  romWatch = setInterval(() => {
+    if (!romOpen() || !romState.path) return;
+    post("files:list", { path: romState.path }).then((r) => {
+      if (!r || !r.ok || !romOpen()) return;
+      const files = (r.folder.entries || []).filter((e) => !e.is_dir && romKind(e.name));
+      const sig = files.map((e) => e.name).join("|");
+      if (sig && sig !== romState.sig) {
+        const isNew = !romState.sig;
+        romState.sig = sig;
+        renderRoms(r);
+        if (isNew) toast("Found " + files[files.length - 1].name + " — press Enter to play", "ok");
+      }
+    });
+  }, 2500);
+}
+function stopRomWatch() {
+  if (romWatch) { clearInterval(romWatch); romWatch = null; }
+}
 
 function openRomPicker(game) {
   romState.game = game;
   romState.ext = {};
+  romState.sig = "";
   (game.rom_exts || []).forEach((e) => (romState.ext[e.toLowerCase()] = true));
   $("#rom-ov").classList.add("open");
   $("#rom-title").textContent = game.title;
@@ -1025,12 +1051,18 @@ function openRomPicker(game) {
   // browser is the fallback when there are none yet.
   post("roms:list", { id: game.id }).then((r) => {
     const games = (r && r.games) || [];
-    if (games.length) { renderRomLibrary(games); }
-    else { romGo((game.rom_dir) || ""); }
+    startRomWatch();
+    if (games.length) { renderRomLibrary(games); return; }
+    // First run for this console: open the file manager on the console's game
+    // folder so a game can be added, and browse the same folder in the picker.
+    const dir = game.rom_dir || "";
+    if (dir) post("files:reveal", { path: dir });
+    romGo(dir);
   });
   sfx.ok();
 }
 function closeRomPicker() {
+  stopRomWatch();
   $("#rom-ov").classList.remove("open");
   romState.game = null;
   renderRoms("", true);

@@ -713,7 +713,7 @@ fn route(state: &AppState, msg: Value) {
             let program = integrations::apps::first_installed_file_manager()
                 .unwrap_or_else(|| "nautilus".to_string());
             let spec = Spec::new("Files", program).arg(dir.to_string_lossy().to_string());
-            match launch_spec(state, &spec, None) {
+            match spawn_background(&spec) {
                 Ok(()) => reply(state, id, json!({ "ok": true })),
                 Err(e) => reply(state, id, json!({ "ok": false, "error": e.to_string() })),
             }
@@ -1096,6 +1096,18 @@ fn console_polish(program: &str) -> Vec<String> {
         "pcsx2" | "pcsx2-qt" => vec!["--fullscreen".into()],
         _ => vec![],
     }
+}
+
+/// Launch a helper app (e.g. the file manager) *beside* the shell: the shell
+/// window stays visible, no "now playing" state, and quitting the shell does
+/// not take the helper down (it is the user's own file manager window).
+fn spawn_background(spec: &Spec) -> Result<()> {
+    log::info!("opening helper: {} ({})", spec.name, spec.program);
+    let mut child = crate::launcher::spawn(spec)?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 fn launch_spec(state: &AppState, spec: &Spec, library_id: Option<&str>) -> Result<()> {
