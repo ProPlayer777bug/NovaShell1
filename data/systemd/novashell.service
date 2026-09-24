@@ -1,0 +1,19 @@
+[Unit]
+Description=NovaShell — console-style desktop shell
+Documentation=file:///usr/share/doc/novashell/README.md
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=@BINARY@
+# A crash restarts the shell through the internal watchdog.
+ExecStartPost=/bin/sleep 1
+Restart=on-failure
+RestartSec=2
+# Games are launched into their own process groups, so a NovaShell exit
+# never kills a running game.
+KillMode=process
+
+[Install]
+WantedBy=default.target

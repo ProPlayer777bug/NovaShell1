@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=NovaShell
+GenericName=Game shell
+Comment=Console-style desktop shell for Ubuntu
+Exec=novashell
+TryExec=novashell
+Icon=org.novashell
+Terminal=false
+Categories=Game;GTK;
+Keywords=gaming;console;shell;
+StartupNotify=false

@@ -1,0 +1,1379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NovaShell</title>
+<style>
+  /* =============================================================
+     NovaShell — original console-style UI. Single self-contained
+     file: no CDNs, no external fonts, fully offline-capable.
+     Scaling is rem-driven so the whole UI adapts to any resolution
+     (1080p / 4K) through the config ui_scale value.
+     ============================================================= */
+  :root {
+    --accent: #7c3aed;
+    --accent-rgb: 124, 58, 237;
+    --accent2: #22d3ee;
+    --accent2-rgb: 34, 211, 238;
+
+    --bg0: #05060a;
+    --bg1: #0b0e16;
+    --panel: rgba(17, 21, 33, 0.74);
+    --panel-solid: #10131e;
+    --line: rgba(255, 255, 255, 0.08);
+    --line-strong: rgba(255, 255, 255, 0.16);
+
+    --text: #e8ebf4;
+    --text-dim: #8b92a7;
+    --text-faint: #5b6275;
+
+    --ok: #34d399;
+    --warn: #fbbf24;
+    --danger: #f87171;
+
+    --radius: 1.1rem;
+    --radius-sm: 0.7rem;
+    --gap: 1rem;
+
+    --font: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", monospace;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html { font-size: 16px; }
+
+  body {
+    font-family: var(--font);
+    background:
+      radial-gradient(1200px 700px at 80% -10%, rgba(var(--accent-rgb), 0.16), transparent 60%),
+      radial-gradient(900px 600px at 0% 110%, rgba(var(--accent2-rgb), 0.10), transparent 55%),
+      linear-gradient(180deg, var(--bg1), var(--bg0) 70%);
+    color: var(--text);
+    overflow: hidden;
+    height: 100vh;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  body.no-anim * { transition: none !important; animation: none !important; }
+
+  ::-webkit-scrollbar { width: 0.5rem; }
+  ::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 0.5rem; }
+
+  #app { height: 100vh; display: flex; flex-direction: column; }
+
+  /* ------------------------------ Top bar ---------------------------- */
+  #topbar {
+    height: 4.4rem;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 1.4rem;
+    padding: 0 1.6rem;
+    background: linear-gradient(180deg, rgba(10,13,21,0.9), rgba(10,13,21,0.55));
+    border-bottom: 1px solid var(--line);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    position: relative;
+    z-index: 30;
+  }
+
+  #brand {
+    display: flex; align-items: center; gap: 0.7rem;
+    font-weight: 800; letter-spacing: 0.16em;
+    font-size: 1.25rem; text-transform: uppercase;
+    color: var(--text);
+  }
+  #brand .mark {
+    width: 2rem; height: 2rem; border-radius: 0.6rem;
+    background:
+      conic-gradient(from 210deg, var(--accent), var(--accent2), var(--accent));
+    display: grid; place-items: center;
+    box-shadow: 0 0 1.2rem rgba(var(--accent-rgb), 0.55);
+    font-size: 0.9rem; color: #fff;
+  }
+
+  #tabs {
+    display: flex; gap: 0.4rem;
+    margin-left: 1rem;
+    flex: 1 1 auto;
+    overflow-x: auto;
+  }
+  #tabs button {
+    background: transparent; border: 0; color: var(--text-dim);
+    font: inherit; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+    font-size: 0.85rem;
+    padding: 0.5rem 1.1rem; border-radius: 999px; cursor: pointer;
+    display: flex; align-items: center; gap: 0.5rem;
+    transition: color .15s, background .15s;
+  }
+  #tabs button:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+  #tabs button.active { color: #fff; background: rgba(var(--accent-rgb), 0.82); box-shadow: 0 0 0.8rem rgba(var(--accent-rgb), 0.4); }
+
+  #clockwrap { display: flex; flex-direction: column; align-items: flex-end; gap: 0.1rem; }
+  #clockwrap .time { font-size: 1rem; font-weight: 700; letter-spacing: 0.04em; }
+  #clockwrap .date { font-size: 0.72rem; color: var(--text-dim); }
+
+  #powerbtn, #searchbtn, #quickbtn {
+    width: 2.7rem; height: 2.7rem; border-radius: 0.8rem;
+    background: var(--panel); border: 1px solid var(--line);
+    color: var(--text); display: grid; place-items: center; cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  #powerbtn:hover, #searchbtn:hover, #quickbtn:hover { border-color: var(--accent); }
+
+  /* ------------------------------ Screens ---------------------------- */
+  #screens { flex: 1 1 auto; position: relative; overflow: hidden; }
+
+  .screen {
+    position: absolute; inset: 0;
+    padding: 1.6rem 2.4rem 1.4rem;
+    opacity: 0; transform: translateY(0.8rem); pointer-events: none;
+    transition: opacity .25s, transform .25s;
+    overflow-y: auto;
+  }
+  body.no-anim .screen { transition: none; }
+  .screen.active { opacity: 1; transform: none; pointer-events: auto; }
+
+  .screen h2 {
+    font-size: 1.6rem; font-weight: 800; letter-spacing: 0.02em;
+    margin-bottom: 1.2rem; display: flex; align-items: center; gap: 0.8rem;
+  }
+  .screen h2 .sub { font-size: 0.8rem; color: var(--text-dim); font-weight: 500; margin-left: auto; }
+
+  /* --------------------------- Card grid ----------------------------- */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(13.5rem, 1fr));
+    gap: var(--gap);
+  }
+  .grid.wide { grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr)); }
+
+  .card {
+    position: relative;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 0.9rem 0.9rem 0.7rem;
+    cursor: pointer;
+    transition: transform .15s, border-color .15s, box-shadow .15s;
+    overflow: hidden;
+  }
+  .card:hover { transform: translateY(-2px); border-color: var(--line-strong); }
+  .card.focused {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent), 0 0 1.6rem rgba(var(--accent-rgb), 0.45);
+    transform: translateY(-3px) scale(1.02);
+    z-index: 5;
+  }
+  .card .cover {
+    width: 100%; aspect-ratio: 16/9;
+    border-radius: calc(var(--radius) - 0.3rem);
+    background: linear-gradient(135deg, #1a2033, #141827);
+    display: grid; place-items: center;
+    margin-bottom: 0.6rem;
+    overflow: hidden;
+    position: relative;
+  }
+  .card .cover img { width: 100%; height: 100%; object-fit: cover; }
+  .card .cover .ph { font-size: 2rem; opacity: 0.5; }
+  .card .meta { display: flex; flex-direction: column; gap: 0.2rem; padding: 0 0.2rem 0.3rem; }
+  .card .title { font-weight: 700; font-size: 0.98rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .subtitle { font-size: 0.72rem; color: var(--text-dim); display: flex; align-items: center; gap: 0.4rem; }
+  .card .badges { position: absolute; top: 1.1rem; left: 1.1rem; display: flex; gap: 0.4rem; }
+  .badge {
+    font-size: 0.62rem; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 0.2rem 0.55rem; border-radius: 999px;
+    background: rgba(10,13,21,0.75); border: 1px solid var(--line-strong);
+    color: var(--text-dim);
+  }
+  .badge.fav { color: var(--warn); border-color: rgba(251,191,36,0.5); background: rgba(251,191,36,0.12); }
+  .badge.native { color: var(--accent2); border-color: rgba(var(--accent2-rgb),0.5); background: rgba(var(--accent2-rgb),0.12); }
+  .badge.manual { color: var(--ok); border-color: rgba(52,211,153,0.5); background: rgba(52,211,153,0.12); }
+
+  #empty-state {
+    text-align: center; color: var(--text-dim);
+    padding: 4rem 1rem; border: 1px dashed var(--line-strong); border-radius: var(--radius);
+    margin-top: 1rem;
+  }
+  #empty-state strong { color: var(--text); display: block; margin-bottom: 0.4rem; }
+
+  /* --------------------------- Hero / quick -------------------------- */
+  #home-hero {
+    display: grid; grid-template-columns: 1fr 24rem; gap: var(--gap);
+    margin-bottom: 1.4rem;
+  }
+  #hero-card {
+    border-radius: var(--radius); position: relative; overflow: hidden;
+    min-height: 18rem;
+    background:
+      linear-gradient(120deg, rgba(var(--accent-rgb),.5), rgba(var(--accent2-rgb),.3)),
+      linear-gradient(160deg, #1c2340, #10131e);
+    display: flex; align-items: flex-end; padding: 1.8rem;
+    border: 1px solid var(--line-strong);
+  }
+  #hero-card .glow {
+    position: absolute; inset: -30% -20%;
+    background: radial-gradient(40% 60% at 30% 20%, rgba(var(--accent-rgb),0.55), transparent 70%);
+    animation: drift 9s ease-in-out infinite alternate;
+  }
+  body.no-anim #hero-card .glow { animation: none; }
+  @keyframes drift { from { transform: translate(0,0) rotate(0deg);} to { transform: translate(4%, -6%) rotate(4deg);} }
+  #hero-card .content { position: relative; }
+  #hero-card .eyebrow { font-size: 0.72rem; letter-spacing: 0.22em; text-transform: uppercase; color: var(--text-dim); }
+  #hero-card .big { font-size: 2.6rem; font-weight: 900; letter-spacing: 0.01em; line-height: 1.05; margin: 0.3rem 0 0.9rem; }
+  #hero-card .play { margin-top: 0.4rem; }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 0.5rem;
+    background: var(--accent); color: #fff;
+    font: inherit; font-weight: 700; letter-spacing: 0.05em;
+    padding: 0.7rem 1.4rem; border: 0; border-radius: 999px; cursor: pointer;
+    box-shadow: 0 0.4rem 1.2rem rgba(var(--accent-rgb), 0.45);
+  }
+  .btn.ghost { background: var(--panel); border: 1px solid var(--line-strong); box-shadow: none; color: var(--text); }
+  .btn.focused { box-shadow: 0 0 0 2px #fff, 0 0.4rem 1.4rem rgba(var(--accent-rgb),0.6); }
+  .btn.danger { background: var(--danger); box-shadow: 0 0.4rem 1.2rem rgba(248,113,113,0.35); }
+
+  #home-actions {
+    display: grid; grid-template-rows: repeat(4, 1fr); gap: var(--gap);
+  }
+  .act {
+    display: flex; align-items: center; gap: 0.9rem;
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm);
+    padding: 0 1.2rem; cursor: pointer;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .act .ic { color: var(--accent2); }
+  .act .lbl { font-weight: 700; }
+  .act .hint { font-size: 0.7rem; color: var(--text-faint); }
+  .act.focused { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent), 0 0 1.4rem rgba(var(--accent-rgb),0.4); }
+
+  /* ------------------------- Library filter chips -------------------- */
+  #filters { display: flex; gap: 0.5rem; margin-bottom: 1.2rem; flex-wrap: wrap; }
+  #filters button {
+    background: var(--panel); border: 1px solid var(--line); color: var(--text-dim);
+    font: inherit; font-size: 0.78rem; font-weight: 600; letter-spacing: 0.05em;
+    padding: 0.45rem 1rem; border-radius: 999px; cursor: pointer;
+    transition: all .15s;
+  }
+  #filters button:hover { color: var(--text); }
+  #filters button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #filters button.focused { box-shadow: 0 0 0 2px var(--accent); }
+
+  /* ------------------------------ Settings --------------------------- */
+  .settings-col { display: flex; flex-direction: column; gap: var(--gap); max-width: 52rem; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 1.2rem 1.4rem;
+  }
+  .panel h3 { font-size: 0.78rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--accent2); margin-bottom: 0.8rem; }
+  .row {
+    display: flex; align-items: center; gap: 1rem;
+    padding: 0.7rem 0.2rem; cursor: pointer;
+    border-bottom: 1px solid var(--line);
+  }
+  .row:last-child { border-bottom: 0; }
+  .row .info { flex: 1 1 auto; }
+  .row .info .k { font-weight: 600; }
+  .row .info .d { font-size: 0.74rem; color: var(--text-dim); margin-top: 0.1rem; }
+  .row .val { font-size: 0.82rem; color: var(--accent2); font-family: var(--mono); }
+  .row.focused { box-shadow: 0 0 0 2px var(--accent); border-radius: 0.5rem; }
+  .switch {
+    width: 3rem; height: 1.7rem; border-radius: 999px; background: rgba(255,255,255,0.12);
+    position: relative; transition: background .18s; flex: 0 0 auto;
+  }
+  .switch::after {
+    content: ""; position: absolute; top: 0.18rem; left: 0.18rem;
+    width: 1.34rem; height: 1.34rem; border-radius: 50%; background: #fff;
+    transition: transform .18s;
+  }
+  .switch.on { background: var(--accent); }
+  .switch.on::after { transform: translateX(1.3rem); }
+  .swatches { display: flex; gap: 0.6rem; margin-top: 0.5rem; }
+  .swatch { width: 2.2rem; height: 2.2rem; border-radius: 0.7rem; cursor: pointer; border: 2px solid transparent; }
+  .swatch.focused { border-color: #fff; box-shadow: 0 0 0.8rem rgba(var(--accent-rgb),0.5); }
+
+  /* ------------------------------ Sliders ---------------------------- */
+  .slider-row { flex: 1 1 auto; display: flex; align-items: center; gap: 0.8rem; }
+  .slider {
+    flex: 1 1 auto; height: 0.55rem; border-radius: 999px;
+    background: rgba(255,255,255,0.12); position: relative;
+  }
+  .slider .fill {
+    position: absolute; inset: 0 auto 0 0; width: 50%;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    border-radius: 999px;
+  }
+  .slider .knob {
+    position: absolute; top: 50%; width: 1.1rem; height: 1.1rem; border-radius: 50%;
+    background: #fff; transform: translate(-50%, -50%);
+    box-shadow: 0 0 0.5rem rgba(0,0,0,0.4);
+  }
+  .row.slider-active { box-shadow: 0 0 0 2px var(--accent); background: rgba(var(--accent-rgb),0.08); border-radius: 0.6rem; }
+  .pct { min-width: 3rem; text-align: right; font-family: var(--mono); font-size: 0.85rem; }
+
+  /* ------------------------------ Overlays --------------------------- */
+  .overlay {
+    position: absolute; inset: 0; z-index: 60;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(4,6,10,0.55); backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    opacity: 0; pointer-events: none; transition: opacity .2s;
+  }
+  .overlay.open { opacity: 1; pointer-events: auto; }
+  body.no-anim .overlay { transition: none; }
+
+  #quickmenu .sheet {
+    position: absolute; inset: 0 0 0 auto;
+    width: min(26rem, 92vw); height: 100%;
+    background: linear-gradient(180deg, #12151f, #0d1018);
+    border-left: 1px solid var(--line-strong);
+    padding: 1.8rem 1.7rem;
+    transform: translateX(100%); transition: transform .2s;
+    overflow-y: auto;
+  }
+  #quickmenu.open .sheet { transform: none; }
+  body.no-anim #quickmenu .sheet { transition: none; }
+  #quickmenu h2 { font-size: 1rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--text); display: flex; align-items: center; gap: 0.7rem; margin-bottom: 1.2rem; }
+  #quickmenu h2 .qm-close { margin-left: auto; color: var(--text-dim); font-size: 0.8rem; }
+  #quickmenu .row { border-bottom: 1px solid var(--line); }
+  #qm-power { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.5rem; }
+  #qm-power .btn { font-size: 0.78rem; padding: 0.5rem 1rem; }
+
+  #search-ov .field {
+    display: flex; align-items: center; gap: 0.8rem;
+    background: var(--panel-solid); border: 1px solid var(--line-strong);
+    border-radius: 999px; padding: 0.85rem 1.3rem; width: min(44rem, 92vw);
+  }
+  #search-ov .field input {
+    background: transparent; border: 0; outline: 0; color: var(--text);
+    font: inherit; font-size: 1.05rem; flex: 1 1 auto;
+  }
+  #search-results { margin-top: 1.2rem; width: min(44rem, 92vw); display: grid; grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr)); gap: 0.9rem; max-height: 60vh; overflow-y: auto; }
+
+  #playing {
+    position: absolute; inset: 0; z-index: 50;
+    background:
+      radial-gradient(70% 50% at 50% 30%, rgba(var(--accent-rgb),0.35), transparent 70%),
+      linear-gradient(180deg, #0a0d16, #05060a);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1.4rem;
+    opacity: 0; pointer-events: none; transition: opacity .3s; text-align: center;
+  }
+  #playing.open { opacity: 1; pointer-events: auto; }
+  body.no-anim #playing { transition: none; }
+  #playing .ring {
+    width: 9rem; height: 9rem; border-radius: 50%;
+    border: 2px solid rgba(var(--accent-rgb),0.25);
+    border-top-color: var(--accent);
+    display: grid; place-items: center;
+    animation: spin 1.6s linear infinite;
+  }
+  body.no-anim #playing .ring { animation: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #playing .ring .novamark { font-size: 3.2rem; opacity: 0.9; }
+  #playing h2 { font-size: 2rem; font-weight: 800; }
+  #playing .hint { color: var(--text-dim); font-size: 0.82rem; }
+  #playing .hint kbd { color: var(--text); }
+
+  /* ------------------------------ Toasts ----------------------------- */
+  #toasts { position: absolute; top: 1.2rem; left: 50%; transform: translateX(-50%); z-index: 100; display: flex; flex-direction: column; gap: 0.6rem; align-items: center; pointer-events: none; }
+  .toast {
+    background: var(--panel-solid); border: 1px solid var(--line-strong);
+    border-radius: 999px; padding: 0.6rem 1.3rem;
+    font-size: 0.85rem; font-weight: 600;
+    box-shadow: 0 0.6rem 1.6rem rgba(0,0,0,0.4);
+    opacity: 0; transform: translateY(-0.6rem); transition: opacity .25s, transform .25s;
+  }
+  .toast.show { opacity: 1; transform: none; }
+  .toast.ok { border-color: rgba(52,211,153,0.5); }
+  .toast.warn { border-color: rgba(251,191,36,0.5); }
+
+  /* ------------------------------ Status bar ------------------------- */
+  #statusbar {
+    flex: 0 0 auto;
+    min-height: 2.6rem;
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.3rem 1.6rem;
+    background: linear-gradient(180deg, rgba(10,13,21,0.55), rgba(10,13,21,0.85));
+    border-top: 1px solid var(--line);
+    font-size: 0.74rem; color: var(--text-dim);
+    overflow-x: auto; white-space: nowrap;
+  }
+  #statusbar .chip { display: flex; align-items: center; gap: 0.35rem; }
+  #statusbar .dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--ok); display: inline-block; }
+  #statusbar .dot.off { background: var(--text-faint); }
+  #statusbar .dot.warn { background: var(--warn); }
+  #statusbar .spacer { flex: 1 1 auto; }
+  #statusbar b { color: var(--text); font-weight: 600; }
+
+  /* --------------------------- Focus helpers ------------------------- */
+  .kbd-hints { display: flex; gap: 0.7rem; flex-wrap: wrap; font-size: 0.72rem; color: var(--text-faint); }
+  .kbd-hints span { display: inline-flex; align-items: center; gap: 0.35rem; }
+  .kbd-hints kbd {
+    background: var(--panel); border: 1px solid var(--line-strong); border-bottom-width: 2px;
+    border-radius: 0.35rem; padding: 0.1rem 0.45rem; font-family: var(--mono); color: var(--text);
+  }
+  .section-title { font-size: 0.85rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-dim); margin: 1.4rem 0 0.7rem; font-weight: 700; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header id="topbar">
+    <div id="brand">
+      <div class="mark">N</div>
+      <span>NovaShell</span>
+    </div>
+    <nav id="tabs">
+      <button data-tab="home" class="active">Home</button>
+      <button data-tab="library">Library</button>
+      <button data-tab="settings">Settings</button>
+    </nav>
+    <div id="clockwrap">
+      <span class="time" id="clock-time">--:--</span>
+      <span class="date" id="clock-date"></span>
+    </div>
+    <button id="searchbtn" title="Search ( / )" data-mouse="search">Search</button>
+    <button id="quickbtn" title="Quick menu (joypad)" data-mouse="quick">Menu</button>
+  </header>
+
+  <main id="screens">
+    <section class="screen active" data-screen="home">
+      <h2>Home <span class="sub" id="home-greeting"></span></h2>
+      <div id="home-hero">
+        <div id="hero-card"></div>
+        <div id="home-actions"></div>
+      </div>
+      <div id="home-recent">
+        <div class="section-title">Recently played</div>
+        <div class="grid wide" id="recent-grid"></div>
+      </div>
+      <div id="home-favs">
+        <div class="section-title">Favorites</div>
+        <div class="grid" id="fav-grid"></div>
+      </div>
+    </section>
+
+    <section class="screen" data-screen="library">
+      <h2>Library <span class="sub" id="lib-count"></span></h2>
+      <div id="filters">
+        <button data-filter="all" class="active">All</button>
+        <button data-filter="favorites">Favorites</button>
+        <button data-filter="steam">Steam</button>
+        <button data-filter="heroic">Heroic</button>
+        <button data-filter="desktop">Native</button>
+        <button data-filter="manual">Manual</button>
+      </div>
+      <div class="grid wide" id="lib-grid"></div>
+      <div id="empty-state" hidden><strong>Nothing here yet</strong>Launch a launcher and press Refresh in Settings.</div>
+    </section>
+
+    <section class="screen" data-screen="settings">
+      <h2>Settings</h2>
+      <div class="settings-col" id="settings-col"></div>
+    </section>
+  </main>
+
+  <div id="statusbar">
+    <span class="chip"><span class="dot" id="st-wifi"></span><span id="st-net">--</span></span>
+    <span class="chip" id="st-cpu">CPU --</span>
+    <span class="chip" id="st-mem">RAM --</span>
+    <span class="chip" id="st-disk">Disk --</span>
+    <span class="chip" id="st-bat" hidden>BAT --</span>
+    <span class="chip" id="st-ups">UP --</span>
+    <span class="chip" id="st-ctr">Joypads: 0</span>
+    <span class="spacer"></span>
+    <span class="chip" id="st-usr">--@--</span>
+  </div>
+
+  <div class="overlay" id="quickmenu">
+    <div class="sheet"></div>
+  </div>
+
+  <div class="overlay" id="search-ov">
+    <div>
+      <div class="field">
+        <span style="color:var(--text-dim)">Search</span>
+        <input id="search-input" type="text" placeholder="Type a game name…" autocomplete="off">
+      </div>
+      <div id="search-results"></div>
+    </div>
+  </div>
+
+  <div id="playing">
+    <div class="ring"><div class="novamark">N</div></div>
+    <h2 id="playing-title">Booting…</h2>
+    <p class="hint">Game is running &mdash; press <kbd>L2</kbd> + <kbd>R2</kbd> then <b>Return to desktop</b> to come back</p>
+  </div>
+
+  <div id="toasts"></div>
+  <div class="overlay" id="hidden-close" tabindex="-1" style="display:none"></div>
+</div>
+
+<script>
+"use strict";
+
+/* =====================================================================
+   NovaShell UI logic — fully original, dependency-free.
+   ===================================================================== */
+
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+const state = {
+  booted: false,
+  config: { accent: "#7c3aed", ui_scale: 1.0, controller: { mapping: {} } },
+  library: [],
+  status: {},
+  tab: "home",
+  filter: "all",
+  lastFocus: null,
+  playing: null,
+};
+
+/* ----------------------------- Bridge ------------------------------ */
+let msgSeq = 0;
+const pending = new Map();
+
+function nativeBridge() {
+  return window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.novashell;
+}
+
+function post(cmd, data) {
+  const id = "m" + (++msgSeq);
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    if (nativeBridge()) {
+      nativeBridge().postMessage(JSON.stringify(Object.assign({ cmd, id }, data || {})));
+    } else {
+      // Browser dev fallback: serve canned data so the UI is stylable offline.
+      setTimeout(() => mockReply(cmd, id), 30);
+    }
+  });
+}
+
+function mockReply(cmd, id) {
+  const builtins = {
+    boot: () => ({
+      ok: true, version: "dev-mock",
+      config: state.config,
+      library: {
+        games: mockGames(),
+      },
+      status: { cpu_usage_percent: 12, mem_percent: 38, network_up: true, controllers: [] },
+      identity: { user: "developer", host: "novashell-dev" },
+    }),
+    "library:refresh": () => ({ ok: true, games: mockGames() }),
+    "settings:get": () => ({ config: state.config }),
+    "system:status": () => ({ cpu_usage_percent: 12, mem_percent: 38, network_up: true, controllers: [] }),
+    "controller:list": () => ({ controllers: [] }),
+    "system:identity": () => ({ user: "developer", host: "nova-dev" }),
+  };
+  const p = pending.get(id);
+  if (!p) return;
+  pending.delete(id);
+  const handler = builtins[cmd];
+  if (handler) p.resolve(handler());
+  else p.resolve({ ok: true, [cmd.replace(/[^a-z]/g, "_")]: [] });
+}
+
+function mockGames() {
+  const names = ["Nova Rift", "Dustbound", "Solar Canvas", "Pulse\\: Runner", "Astral Loom", "Cinder Groves", "Zero Signal", "Lumen Edge"];
+  const sources = ["steam", "heroic", "desktop", "manual"];
+  return names.map((name, i) => ({
+    id: (sources[i % 4]) + "-" + i,
+    title: name,
+    source: sources[i % 4],
+    icon: null, artwork: null,
+    last_played: i === 0 ? Date.now() / 1000 : Math.max(0, Date.now() / 1000 - i * 86400 * 3),
+    playtime: (i * 7 % 40) + " m", playtime_secs: i * 420,
+    favorite: i % 2 === 0, installed: true,
+  }));
+}
+
+/* Rust -> JS dispatcher. */
+window.novaShellDispatch = function (msg) {
+  if (!msg) return;
+  if (msg.reply) {
+    const p = pending.get(msg.id);
+    if (p) { pending.delete(msg.id); p.resolve(msg.data); }
+    return;
+  }
+  if (msg.event) handleEvent(msg);
+};
+
+function handleEvent(msg) {
+  switch (msg.event) {
+    case "status":
+      state.status = msg.data || {};
+      paintStatus(msg.data || {});
+      break;
+    case "game_start":
+      state.playing = msg.title || "A game";
+      showPlaying(true);
+      break;
+    case "game_exit":
+      showPlaying(false);
+      if (state.playing) toast("Closed " + state.playing, "ok");
+      state.playing = null;
+      refreshLibrary(true, false);
+      break;
+    case "controller":
+      handleController(msg);
+      break;
+    case "settings_changed":
+      state.config = msg.config || state.config;
+      applyTheme();
+      break;
+    case "library_changed":
+      refreshLibrary(true, false);
+      break;
+  }
+}
+
+/* ----------------------------- Audio ------------------------------- */
+let audioCtx = null;
+function beep(freq, dur, gain) {
+  const cfg = state.config || { animations: true, performance_mode: false };
+  if (cfg.performance_mode || cfg.animations === false) return;
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = "sine"; o.frequency.value = freq;
+    g.gain.value = gain || 0.02;
+    o.connect(g); g.connect(audioCtx.destination);
+    const t = audioCtx.currentTime;
+    g.gain.setValueAtTime(gain || 0.02, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + (dur || 0.05));
+    o.start(t); o.stop(t + (dur || 0.05));
+  } catch (e) { /* silent */ }
+}
+const sfx = { nav: () => beep(520, 0.03, 0.012), move: () => beep(520, 0.03, 0.012), ok: () => beep(720, 0.06, 0.02), back: () => beep(320, 0.05, 0.015), err: () => beep(140, 0.09, 0.03) };
+
+/* --------------------------- Navigation ---------------------------- */
+const nav = {
+  grid: [],
+  current: null,
+};
+
+function indexFocus(container) {
+  nav.grid = [];
+  if (!container) return;
+  container.querySelectorAll("[data-x][data-y]").forEach((el) => {
+    nav.grid.push({ el, x: parseInt(el.dataset.x, 10), y: parseInt(el.dataset.y, 10) });
+  });
+}
+
+function focus(el, scroll) {
+  if (!el) return;
+  $$(".focused").forEach((x) => x.classList.remove("focused"));
+  el.classList.add("focused");
+  nav.current = el;
+  if (scroll !== false && el.scrollIntoView) {
+    try { el.scrollIntoView({ block: "nearest", behavior: state.config.animations ? "smooth" : "auto" }); } catch (e) {}
+  }
+}
+
+function moveFocus(dir) {
+  if (!nav.current) return;
+  sfx.nav();
+  const cur = nav.current;
+  const x = parseInt(cur.dataset.x, 10);
+  const y = parseInt(cur.dataset.y, 10);
+  let best = null, bestScore = Infinity;
+  for (const f of nav.grid) {
+    if (f.el === cur) continue;
+    const dx = f.x - x, dy = f.y - y;
+    let score = Infinity;
+    if (dir === "left" && dx < 0 && dy === 0) score = -dx;
+    if (dir === "right" && dx > 0 && dy === 0) score = dx + Math.abs(dy) * 1000;
+    if (dir === "up" && dy < 0 && dx === 0) score = -dy;
+    if (dir === "down" && dy > 0 && dx === 0) score = dy + Math.abs(dx) * 1000;
+    if (dir === "left" && dx < 0 && dy !== 0) score = -dx + Math.abs(dy) * 500;
+    if (dir === "up" && dy < 0 && dx !== 0) score = -dy + Math.abs(dx) * 500;
+    if (score < bestScore) { bestScore = score; best = f.el; }
+  }
+  // Fallback: allow drifting to nearest element in general direction.
+  if (!best) {
+    for (const f of nav.grid) {
+      if (f.el === cur) continue;
+      const dx = f.x - x, dy = f.y - y;
+      const ok =
+        (dir === "left" && dx < 0) || (dir === "right" && dx > 0) ||
+        (dir === "up" && dy < 0) || (dir === "down" && dy > 0);
+      if (!ok) continue;
+      const score = Math.abs(dx) + Math.abs(dy);
+      if (score < bestScore) { bestScore = score; best = f.el; }
+    }
+  }
+  if (best) {
+    if (nav.current.hasAttribute("data-slider-active")) exitSlider();
+    focus(best);
+  }
+}
+
+function confirm() {
+  const el = nav.current;
+  if (!el) return;
+  if (el.hasAttribute("data-slider")) { enterSlider(el); return; }
+  if (el.hasAttribute("data-active-slider")) { exitSlider(); return; }
+  const action = el.dataset.action;
+  if (action) runAction(action, el);
+  sfx.ok();
+}
+
+function back() {
+  if (nav.current && nav.current.hasAttribute("data-active-slider")) { exitSlider(); return; }
+  if (quickOpen()) { closeQuick(); return; }
+  if (searchOpen()) { closeSearch(); return; }
+  if (state.playing) { return; }
+  if (state.tab !== "home") { setTab("home"); return; }
+  // On Home, back does nothing.
+  sfx.back();
+}
+
+function runAction(action, el) {
+  switch (action) {
+    case "tab":
+      setTab(el.dataset.tab);
+      break;
+    case "filter":
+      state.filter = el.dataset.filter;
+      renderLibrary(true);
+      break;
+    case "launch":
+      launchGame(el.dataset.gid);
+      break;
+    case "toggle-fav":
+      toggleFavorite(el.dataset.gid, el);
+      break;
+    case "quick":
+      toggleQuick();
+      break;
+    case "search":
+      openSearch();
+      break;
+    case "screenshot":
+      captureScreenshot();
+      break;
+    case "desktop":
+      post("power:action", { action: "desktop" });
+      break;
+    case "power-sleep": post("power:action", { action: "suspend" }); break;
+    case "power-restart": post("power:action", { action: "reboot" }); break;
+    case "power-shutdown": post("power:action", { action: "poweroff" }); break;
+    case "power-logout": post("power:action", { action: "logout" }); break;
+    case "refresh": refreshLibrary(false, true); break;
+    case "set": settingsSet(el); break;
+    case "swatch": settingsSetSwatch(el.dataset.swatch); break;
+    case "dep-close": closeQuick(); break;
+  }
+}
+
+function launchGame(id) {
+  const game = state.library.find((g) => g.id === id);
+  if (!game) return;
+  toast("Launching " + game.title + " …");
+  post("game:launch", { id }).then((r) => {
+    if (r && r.ok === false) toast(r.error || "Failed to launch", "warn");
+  });
+}
+
+function toggleFavorite(id, el) {
+  const game = state.library.find((g) => g.id === id);
+  if (!game) return;
+  const fav = !game.favorite;
+  post("library:favorite", { game: id, favorite: fav }).then(() => {
+    game.favorite = fav;
+    if (el) {
+      const badge = el.querySelector(".badge.fav");
+      if (badge) { badge.textContent = fav ? "Fav" : ""; badge.style.display = fav ? "" : "none"; }
+    }
+    toast(fav ? "Added to favorites" : "Removed from favorites");
+  });
+}
+
+/* ------------------------------ Sliders ----------------------------- */
+const SLIDERS = {};
+
+function enterSlider(el) {
+  const key = el.dataset.slider;
+  const s = SLIDERS[key];
+  if (!s) return;
+  s.active = true;
+  el.setAttribute("data-active-slider", "");
+  el.classList.add("slider-active");
+  sfx.ok();
+}
+
+function exitSlider() {
+  const el = nav.current;
+  if (!el) return;
+  const key = el.dataset.slider;
+  el.removeAttribute("data-active-slider");
+  el.classList.remove("slider-active");
+  if (SLIDERS[key]) SLIDERS[key].active = false;
+  sfx.back();
+}
+
+function adjustSlider(key, delta) {
+  const s = SLIDERS[key];
+  if (!s || typeof s.value !== "number") return;
+  s.value = Math.max(s.min || 0, Math.min(s.max || 100, s.value + delta));
+  renderSlider(key);
+  s.onchange && s.onchange(s.value);
+  sfx.nav();
+}
+
+function renderSlider(key) {
+  const s = SLIDERS[key];
+  if (!s || !s.el) return;
+  const pct = Math.round(((s.value - (s.min || 0)) / ((s.max || 100) - (s.min || 0))) * 100);
+  s.el.querySelector(".pct").textContent = pct + "%";
+  const fill = s.el.querySelector(".fill");
+  const knob = s.el.querySelector(".knob");
+  if (fill) fill.style.width = pct + "%";
+  if (knob) knob.style.left = pct + "%";
+}
+
+/* --------------------------- Keyboard ------------------------------- */
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Tab") { e.preventDefault(); if (state.tab === "home") setTab("library"); else setTab("home"); return; }
+  const k = e.key;
+  if (k === "ArrowUp") { e.preventDefault(); moveFocus("up"); }
+  else if (k === "ArrowDown") { e.preventDefault(); moveFocus("down"); }
+  else if (k === "ArrowLeft") { e.preventDefault(); handleLeft(); }
+  else if (k === "ArrowRight") { e.preventDefault(); handleRight(); }
+  else if (k === "Enter" || k === " ") { e.preventDefault(); confirm(); }
+  else if (k === "Escape") { e.preventDefault(); back(); }
+  else if (k === "/") { e.preventDefault(); openSearch(); }
+  else if (k === "q" || k === "Q") { e.preventDefault(); toggleQuick(); }
+  else if (k === "PrintScreen" || k === "F2") { captureScreenshot(); }
+  else if (k === "1") setTab("home");
+  else if (k === "2") setTab("library");
+  else if (k === "3") setTab("settings");
+});
+
+function handleLeft() {
+  const el = nav.current;
+  if (el && el.hasAttribute("data-active-slider")) { adjustSlider(el.dataset.slider, -5); return; }
+  if (searchOpen()) { moveSearch(-1); return; }
+  moveFocus("left");
+}
+function handleRight() {
+  const el = nav.current;
+  if (el && el.hasAttribute("data-active-slider")) { adjustSlider(el.dataset.slider, 5); return; }
+  if (searchOpen()) { moveSearch(1); return; }
+  moveFocus("right");
+}
+function handleUp() {
+  if (searchOpen()) { moveSearch(-1); return; }
+  moveFocus("up");
+}
+function handleDown() {
+  if (searchOpen()) { moveSearch(1); return; }
+  moveFocus("down");
+}
+
+/* --------------------------- Controller ------------------------------ */
+function handleController(msg) {
+  if (!msg.pressed) return;
+  if (msg.action === "screenshot") { captureScreenshot(); return; }
+  if (msg.action === "quick_menu" || msg.action === "context") { toggleQuick(); return; }
+  if (msg.action === "menu") { openSearch(); return; }
+  if (msg.action === "tab_next") { cycleTab(1); return; }
+  if (msg.action === "tab_prev") { cycleTab(-1); return; }
+  switch (msg.action) {
+    case "up": handleUp(); break;
+    case "down": handleDown(); break;
+    case "left": handleLeft(); break;
+    case "right": handleRight(); break;
+    case "confirm": confirm(); break;
+    case "back": back(); break;
+    case "detail": {
+      const el = nav.current;
+      if (el && el.dataset.action === "launch") toggleFavorite(el.dataset.gid, el);
+      else toast("Press X on a game to favorite it");
+      break;
+    }
+  }
+}
+
+let tabIndex = 0;
+const TAB_NAMES = ["home", "library", "settings"];
+function cycleTab(d) { setTab(TAB_NAMES[(tabIndex + d + TAB_NAMES.length) % TAB_NAMES.length]); }
+
+/* ------------------------------ Tabs -------------------------------- */
+function setTab(name) {
+  state.tab = name;
+  tabIndex = TAB_NAMES.indexOf(name);
+  $$(".screen").forEach((s) => s.classList.toggle("active", s.dataset.screen === name));
+  $$("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+  reindexCurrent();
+}
+
+function reindexCurrent() {
+  const screen = $(".screen.active");
+  indexFocus(screen);
+  focusFirst(screen);
+}
+
+function focusFirst(container) {
+  if (!nav.grid.length) return;
+  focus(nav.grid[0].el);
+}
+
+/* ------------------------------- Search ------------------------------ */
+function openSearch() {
+  $("#search-ov").classList.add("open");
+  const input = $("#search-input");
+  input.value = "";
+  renderSearch("");
+  setTimeout(() => input.focus(), 60);
+  sfx.ok();
+}
+function closeSearch() {
+  $("#search-ov").classList.remove("open");
+  renderSearch("", true);
+  sfx.back();
+}
+function searchOpen() { return $("#search-ov").classList.contains("open"); }
+
+$("#search-input").addEventListener("input", (e) => renderSearch(e.target.value));
+
+function renderSearch(q, done) {
+  const box = $("#search-results");
+  if (done) { box.innerHTML = ""; return; }
+  const qq = q.trim().toLowerCase();
+  const hits = qq
+    ? state.library.filter((g) => g.title.toLowerCase().includes(qq)).slice(0, 24)
+    : state.library.slice(0, 12);
+  if (!hits.length) { box.innerHTML = "<div id='empty-state'><strong>No matches</strong>Try a different name.</div>"; return; }
+  box.innerHTML = hits.map((g, i) => gameCard(g, i, 0)).join("");
+  const first = box.querySelector("[data-x][data-y]");
+  if (first) { indexFocus(box); focus(first); }
+}
+
+let searchRow = 0;
+function moveSearch(d) { renderSearch($("#search-input").value); }
+
+/* ------------------------------ Quick menu --------------------------- */
+function toggleQuick() {
+  const qm = $("#quickmenu");
+  if (qm.classList.contains("open")) closeQuick();
+  else {
+    renderQuick();
+    qm.classList.add("open");
+    const rows = qm.querySelectorAll(".row[data-x][data-y]");
+    if (rows.length) { indexFocus(qm); focus(rows[0]); }
+  }
+}
+function quickOpen() { return $("#quickmenu").classList.contains("open"); }
+function closeQuick() {
+  $("#quickmenu").classList.remove("open");
+  reindexCurrent();
+  sfx.back();
+}
+
+function buildQuickSheet() {
+  const rows = [];
+  const addRow = (key, icon, label, desc) => rows.push('<div class="row" data-x="0" data-y="' + rows.length + '" data-slider="' + key + '"><div class="slider-row">' + icon + '<div class="slider"><div class="fill"></div><div class="knob"></div></div><span class="pct">--%</span></div></div>');
+  addRow("volume", ic("speaker"), "Volume", "System audio");
+  addRow("brightness", ic("sun"), "Brightness", "Backlight");
+
+  const menu = `
+    <div class="row" data-x="0" data-y="${rows.length += 1}" data-action="dep-close">${ic("x")}<span class="info"><span class="k">Close menu</span></span></div>
+    <div class="row" data-x="0" data-y="${rows.length += 1}" id="qm-wifi">${ic("wifi")}<span class="info"><span class="k">Wi-Fi</span><div class="d" id="qm-wifi-d">--</div></span></div>
+    <div class="row" data-x="0" data-y="${rows.length += 1}" id="qm-bt">${ic("bt")}<span class="info"><span class="k">Bluetooth</span><div class="d" id="qm-bt-d">No devices</div></span></div>
+    <div class="row" data-x="0" data-y="${rows.length += 1}" data-action="set" data-set="performance_mode">${ic("bolt")}<span class="info"><span class="k">Performance mode</span><div class="d">Prioritize low latency</div></span><div class="switch" id="sw-perf"></div></div>
+    <div class="row" data-x="0" data-y="${rows.length += 1}" data-action="screenshot">${ic("camera")}<span class="info"><span class="k">Take screenshot</span></span></div>
+    <div class="row" data-x="0" data-y="${rows.length += 1}" data-action="desktop">${ic("display")}<span class="info"><span class="k">Return to desktop</span><div class="d">Exit NovaShell to GNOME</div></span></div>
+    <div class="row" data-x="0" data-y="${rows.length += 1}">${ic("power")}<span class="info"><span class="k">Power</span></span>
+      <span id="qm-power">
+        <button class="btn ghost" data-action="power-sleep" data-x="2" data-y="${rows.length}">Sleep</button>
+        <button class="btn ghost" data-action="power-restart" data-x="3" data-y="${rows.length}">Restart</button>
+        <button class="btn ghost" data-action="power-shutdown" data-x="4" data-y="${rows.length}">Shut down</button>
+        <button class="btn ghost" data-action="power-logout" data-x="5" data-y="${rows.length}">Log out</button>
+      </span>
+    </div>`;
+  return rows.slice(0, 2).join("") + menu;
+}
+
+function renderQuick() {
+  const st = state.status || {};
+  $("#quickmenu .sheet").innerHTML =
+    "<h2>Control <span style='opacity:.4'>/ NovaShell</span><span class='qm-close'>L2/R2 or Esc</span></h2>" +
+    buildQuickSheet();
+  const volume = SLIDERS.volume = SLIDERS.volume || { value: st.volume ?? 60, min: 0, max: 100, onchange: (v) => post("quick:volume", { value: v }) };
+  const brightness = SLIDERS.brightness = SLIDERS.brightness || { value: st.brightness ?? 80, min: 0, max: 100, onchange: (v) => post("quick:brightness", { value: v }) };
+  volume.el = $("#quickmenu [data-slider=volume]");
+  brightness.el = $("#quickmenu [data-slider=brightness]");
+  renderSlider("volume"); renderSlider("brightness");
+
+  $("#qm-wifi-d").textContent = st.network_up ? (st.network_ssid || "Connected") : "Offline";
+  $("#qm-bt-d").textContent = (st.bluetooth && st.bluetooth.length) ? st.bluetooth.join(", ") : "No devices";
+  const perf = $("#sw-perf");
+  if (perf) { perf.classList.toggle("on", !!state.config.performance_mode); }
+}
+
+/* ------------------------------ Toasts ------------------------------- */
+function toast(text, kind) {
+  const box = $("#toasts");
+  const t = document.createElement("div");
+  t.className = "toast" + (kind ? " " + kind : "");
+  t.textContent = text;
+  box.appendChild(t);
+  requestAnimationFrame(() => t.classList.add("show"));
+  setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 300); }, 2600);
+}
+
+/* ------------------------------ Status ------------------------------- */
+function paintStatus(s) {
+  const fmt = (v) => (v == null ? "--" : v);
+  $("#st-cpu").textContent = "CPU " + fmt(Math.round((s.cpu_usage_percent || 0))) + "%";
+  $("#st-mem").textContent = "RAM " + fmt(Math.round((s.mem_percent || 0))) + "%";
+  const diskFree = s.disk_free_mb, diskTotal = s.disk_total_mb;
+  if (diskFree && diskTotal) $("#st-disk").textContent = "Disk " + fmt(Math.round((diskTotal - diskFree) / 1024)) + "/" + fmt(Math.round(diskTotal / 1024)) + " GB";
+  else $("#st-disk").textContent = "Disk --";
+  const bat = $("#st-bat");
+  const b = s.battery_percent;
+  if (b != null) { bat.hidden = false; bat.textContent = "BAT " + b + "%" + (s.battery_charging ? " ⇧" : ""); }
+  else bat.hidden = true;
+  $("#st-ups").textContent = "UP " + (s.uptime_secs ? humanUptime(s.uptime_secs) : "--");
+  const n = s.controllers ? s.controllers.length : 0;
+  $("#st-ctr").textContent = "Joypads: " + n;
+  $("#st-usr").textContent = (s.user || "--") + "@" + (s.host || "--");
+  const wifi = $("#st-wifi");
+  wifi.classList.toggle("off", !s.network_up);
+  const net = s.network_up ? (s.network_ssid || "Online") : "Offline";
+  $("#st-net").textContent = net;
+}
+
+function humanUptime(secs) {
+  const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
+  if (d) return d + "d " + h + "h";
+  if (h) return h + "h " + m + "m";
+  return m + "m";
+}
+
+function startClock() {
+  const t = $("#clock-time"), d = $("#clock-date");
+  const pad = (n) => String(n).padStart(2, "0");
+  const tick = () => {
+    const now = new Date();
+    t.textContent = pad(now.getHours()) + ":" + pad(now.getMinutes());
+    d.textContent = now.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  };
+  tick();
+  setInterval(tick, 1000);
+}
+
+/* ------------------------------ Icons -------------------------------- */
+function ic(name) {
+  const p = {
+    speaker: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" stroke="none"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg>',
+    sun: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+    wifi: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12.5a10 10 0 0 1 14 0"/><path d="M8.5 16a5 5 0 0 1 7 0"/><circle cx="12" cy="19.5" r="1.4" fill="currentColor" stroke="none"/></svg>',
+    bt: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7l10 10-5 5V2l5 5L7 17"/></svg>',
+    bolt: '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"/></svg>',
+    camera: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 8h3l2-3h8l2 3h3v12H3z"/><circle cx="12" cy="13" r="3.4"/></svg>',
+    display: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M9 20h6M12 16v4"/></svg>',
+    power: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v9"/><path d="M6.5 5a9 9 0 1 0 11 0"/></svg>',
+    x: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 5l14 14M19 5L5 19"/></svg>',
+    rocket: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 15c-2 0-3 5-3 5s5-1 5-3"/><path d="M20 4c-6 0-10 4-11 12h7c8-1 12-5 4-12z"/><circle cx="14.5" cy="9.5" r="1.4" fill="currentColor" stroke="none"/></svg>',
+    refresh: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.6-6.3"/><path d="M21 3v6h-6"/></svg>',
+    star: '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.9 6.3 6.9.8-5.1 4.7 1.4 6.8L12 17.4 5.9 20.6l1.4-6.8L2.2 9.1l6.9-.8z"/></svg>',
+    gamepad: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 11h4M8 9v4"/><path d="M15 10.5h.01M17.5 13h.01"/><rect x="2" y="6" width="14" height="12" rx="5"/><path d="M16 9c4.5-1 6 .5 6 3s-1.5 4-6 3"/></svg>',
+    folder: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
+  };
+  return p[name] || "";
+}
+
+/* ------------------------- Game card renderer ------------------------ */
+function gameCard(g, x, y) {
+  const src = { steam: "Steam", heroic: "Heroic", desktop: "Native", manual: "Manual" }[g.source] || g.source;
+  const badge = (g.favorite ? '<span class="badge fav">' + ic("star").replace('width="18"', 'width="10"').replace('height="18"', 'height="10"') + '</span>' : "") + '<span class="badge">' + src + "</span>";
+  const cover = g.artwork
+    ? '<div class="cover"><img alt="" src="file://' + g.artwork + '"></div>'
+    : (g.icon
+      ? '<div class="cover" style="background:linear-gradient(135deg,#232a44,#141827)"><img alt="" src="file://' + g.icon + '"></div>'
+      : '<div class="cover"><div class="ph">' + "◈" + "</div></div>");
+  return (
+    '<div class="card" data-x="' + x + '" data-y="' + y + '" data-action="launch" data-gid="' + g.id + '">' +
+      '<div class="badges">' + badge + "</div>" +
+      cover +
+      '<div class="meta"><span class="title">' + esc(g.title) + "</span>" +
+      '<span class="subtitle">' + (g.playtime || "Never played") + "</span></div>" +
+    "</div>"
+  );
+}
+
+function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+/* ------------------------------ Home render -------------------------- */
+function renderHome() {
+  const games = state.library;
+  const recent = games.filter((g) => g.last_played).slice(0, 8);
+  const favs = games.filter((g) => g.favorite).slice(0, 6);
+  const heroGame = recent[0] || games[0];
+
+  const hero = $("#hero-card");
+  hero.innerHTML = heroGame
+    ? '<div class="glow"></div><div class="content"><div class="eyebrow">' + (heroGame.last_played ? "Recently played" : "Featured") + "</div>" +
+      '<div class="big">' + esc(heroGame.title) + "</div>" +
+      '<button class="btn play" data-x="0" data-y="1" data-action="launch" data-gid="' + heroGame.id + '">Play ' + ic("rocket") + "</button>" +
+      '<button class="btn ghost" data-x="1" data-y="1" data-action="toggle-fav" data-gid="' + heroGame.id + '">' + (heroGame.favorite ? "★" : "☆") + " Favorite</button></div>"
+    : '<div class="glow"></div><div class="content"><div class="eyebrow">Welcome to</div><div class="big">NovaShell</div><p style="color:var(--text-dim)">No games yet — add your launchers in Settings.</p></div>';
+
+  const actions = $("#home-actions");
+  actions.innerHTML = [
+    act(0, 0, "screenshot", "camera", "Screenshot", "F2 / Share"),
+    act(0, 1, "quick", "gamepad", "Open menu", "L2/R2"),
+    act(0, 2, "search", "rocket", "Search", "/"),
+    act(0, 3, "desktop", "display", "Return to desktop", "Quit to GNOME"),
+  ].join("");
+
+  const recentBox = $("#recent-grid");
+  recentBox.innerHTML = recent.length ? recent.map((g, i) => gameCard(g, i, 0)).join("") :
+    '<div style="color:var(--text-dim);padding:0.6rem 0">Nothing played yet — your launches will appear here.</div>';
+  const favBox = $("#fav-grid");
+  favBox.innerHTML = favs.length ? favs.map((g, i) => gameCard(g, i, 0)).join("") :
+    '<div style="color:var(--text-dim);padding:0.6rem 0">No favorites yet.</div>';
+}
+
+function act(x, y, action, icon, label, hint) {
+  return '<div class="act" data-x="' + x + '" data-y="' + y + '" data-action="' + action + '"><span class="ic">' + ic(icon) + '</span><div><div class="lbl">' + label + '</div><div class="hint">' + hint + "</div></div></div>";
+}
+
+/* ------------------------------ Library ------------------------------ */
+function renderLibrary(keepFocus) {
+  const box = $("#lib-grid");
+  const filters = { all: true, favorites: (g) => g.favorite, steam: (g) => g.source === "steam", heroic: (g) => g.source === "heroic", desktop: (g) => g.source === "desktop", manual: (g) => g.source === "manual" };
+  const f = filters[state.filter] || filters.all;
+  const list = state.library.filter(f);
+  $("#lib-count").textContent = list.length + " of " + state.library.length;
+  $("#empty-state").hidden = list.length > 0;
+  box.innerHTML = list.length
+    ? list.map((g, i) => gameCardWithIndex(g, i)).join("")
+    : "";
+  $$("#filters button").forEach((b) => b.classList.toggle("active", b.dataset.filter === state.filter));
+  if (!keepFocus) {
+    const screen = $(".screen[data-screen=library]");
+    indexFocus(screen);
+    focusFirst(screen);
+  }
+}
+
+function gameCardWithIndex(g, i) {
+  // Library uses a 3-column-like layout where first row contains filter row (y=1).
+  const col = i % 3;
+  const row = 2 + Math.floor(i / 3);
+  return gameCard(g, col, row);
+}
+
+/* ------------------------------ Settings ----------------------------- */
+function renderSettings() {
+  const c = state.config;
+  const launchers = [
+    srow("steam_enabled", "Steam", "Scan and launch Steam games", c.launchers && c.launchers.steam_enabled),
+    srow("heroic_enabled", "Heroic", "Epic / GOG games via Heroic", c.launchers && c.launchers.heroic_enabled),
+    srow("desktop_enabled", "Native apps", "Show installed desktop applications", c.launchers && c.launchers.desktop_enabled),
+  ].join("");
+  const toggles = [
+    srow("animations", "Animations", "Smooth transitions and motion", c.animations),
+    srow("performance_mode", "Performance mode", "Disable effects; prioritize responsiveness", c.performance_mode),
+    srow("network_refresh", "Bluetooth scan", "Rescan nearby Bluetooth devices", false),
+  ].join("");
+
+  const col = $("#settings-col");
+  col.innerHTML = `
+    <div class="panel"><h3>Appearance</h3>
+      <div class="row" data-x="0" data-y="0" data-action="swatch" data-swatch="accent"><span class="info"><span class="k">Accent color</span><div class="d">Pick the glow that NovaShell uses</div></span>
+        <div class="swatches" id="swatches">${SWATCHES.map((s, i) => '<div class="swatch" data-x="' + (i + 1) + '" data-y="0" data-action="swatch" data-swatch="' + s.value + '" style="background:' + s.value + '" title="' + s.name + '"></div>').join("")}</div>
+      </div>
+      ${sliderRow("ui_scale", 0, "UI scale", "Larger % scales the interface for 4K displays")}
+      ${emptyRow()}
+    </div>
+    <div class="panel"><h3>Launchers</h3>${launchers}</div>
+    <div class="panel"><h3>Experience</h3>${toggles}<div class="kbd-hints" style="margin-top:0.6rem">
+      <span><kbd>↑↓←→</kbd> move</span><span><kbd>Enter</kbd> select</span><span><kbd>Esc</kbd> back</span><span><kbd>Q</kbd> quick menu</span><span><kbd>/</kbd> search</span><span><kbd>F2</kbd> screenshot</span>
+    </div>
+    <div class="row" data-x="0" data-y="9" data-action="refresh">${ic("refresh")}<span class="info"><span class="k">Refresh library</span><div class="d">Re-scan Steam, Heroic and installed apps</div></span></div></div>`;
+
+  syncSettingsUI(col, c);
+  setupSlider("ui_scale", SLIDERS.ui_scale ? SLIDERS.ui_scale.value : Math.round(c.ui_scale * 100), 50, 300, (v) => {
+    const scale = v / 100;
+    applyScale(scale);
+    setTimeout(() => post("settings:set", { ui_scale: scale }), 250);
+  });
+}
+
+function emptyRow() { return '<div class="row" data-x="0" data-y="99" data-action="void" hidden></div>'; }
+
+function sliderRow(key, y, label, desc) {
+  return '<div class="row" data-x="0" data-y="' + y + '" data-slider="' + key + '"><span class="info"><span class="k">' + label + '</span><div class="d">' + desc + "</div></span><div class=\"slider-row\"><div class=\"slider\"><div class=\"fill\"></div><div class=\"knob\"></div></div><span class=\"pct\">--%</span></div></div>";
+}
+
+const SWATCHES = [
+  { name: "Violet", value: "#7c3aed" },
+  { name: "Cyan", value: "#06b6d4" },
+  { name: "Emerald", value: "#10b981" },
+  { name: "Coral", value: "#f97316" },
+  { name: "Rose", value: "#e11d48" },
+  { name: "Gold", value: "#f59e0b" },
+];
+
+function srow(key, k, d, on) {
+  return '<div class="row" data-x="0" data-y="' + keyYX(key)[1] + '" data-action="set" data-set="' + key + '"><span class="info"><span class="k">' + k + '</span><div class="d">' + d + '</div></span><input class="switch-input" data-switch="' + key + '" type="checkbox" ' + (on ? "checked" : "") + ' hidden><div class="switch" data-switch="' + key + '"></div></div>';
+}
+
+function keyYX(key) {
+  const map = { steam_enabled: 4, heroic_enabled: 4, desktop_enabled: 4, animations: 6, performance_mode: 7, network_refresh: 8 };
+  return [0, map[key] || 6];
+}
+
+function syncSettingsUI(col, c) {
+  col.querySelectorAll(".switch").forEach((sw) => {
+    const key = sw.dataset.switch;
+    let on;
+    if (key === "steam_enabled") on = c.launchers && c.launchers.steam_enabled;
+    else if (key === "heroic_enabled") on = c.launchers && c.launchers.heroic_enabled;
+    else if (key === "desktop_enabled") on = c.launchers && c.launchers.desktop_enabled;
+    else on = c[key];
+    sw.classList.toggle("on", !!on);
+  });
+}
+
+function settingsSet(el) {
+  const key = el.dataset.set;
+  const payload = {};
+  if (key === "steam_enabled" || key === "heroic_enabled" || key === "desktop_enabled") {
+    payload[key] = !(state.config.launchers && state.config.launchers[key]);
+  } else if (key === "performance_mode") {
+    payload[key] = !state.config.performance_mode;
+  } else {
+    payload[key] = !state.config[key];
+  }
+  post("settings:set", payload);
+  state.config = Object.assign({}, state.config, payload);
+  if (key === "performance_mode") applyTheme();
+  syncSettingsUI($("#settings-col"), state.config);
+  refreshLibrary(true, false);
+}
+
+function settingsSetSwatch(value) {
+  post("settings:set", { accent: value });
+  state.config.accent = value;
+  applyTheme();
+  toast("Accent updated");
+}
+
+/* ------------------------------ Theme -------------------------------- */
+function hexToRgb(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec((hex || "").trim());
+  if (!m) return "124, 58, 237";
+  const n = parseInt(m[1], 16);
+  return ((n >> 16) & 255) + ", " + ((n >> 8) & 255) + ", " + (n & 255);
+}
+
+function applyScale(scale) {
+  document.documentElement.style.fontSize = (16 * (scale || 1)).toFixed(2) + "px";
+}
+
+function applyTheme() {
+  const c = state.config || {};
+  const root = document.documentElement;
+  root.style.setProperty("--accent", c.accent || "#7c3aed");
+  root.style.setProperty("--accent-rgb", hexToRgb(c.accent));
+  const noan = !c.animations || c.performance_mode;
+  document.body.classList.toggle("no-anim", !!noan);
+  applyScale(c.ui_scale || 1);
+}
+
+/* ----------------------------- Play overlay --------------------------- */
+function showPlaying(open) {
+  $("#playing").classList.toggle("open", open);
+  $("#playing-title").textContent = state.playing || "Playing…";
+}
+
+/* ----------------------------- Screenshot ----------------------------- */
+function captureScreenshot() {
+  post("system:screenshot", { mode: (state.config || {}).screenshot_mode || "auto" }).then((r) => {
+    if (r && r.ok && r.path) toast("Screenshot saved", "ok");
+    else toast(r && r.error ? r.error : "Screenshot failed (install grim)", "warn");
+    if (r && r.ok && r.path) playClick();
+  });
+}
+function playClick() { sfx.ok(); }
+
+/* ------------------------------ Library ------------------------------- */
+let refreshing = false;
+function refreshLibrary(quiet, toastIt) {
+  if (refreshing) return;
+  refreshing = true;
+  post("library:refresh").then((r) => {
+    refreshing = false;
+    if (r && r.games) {
+      state.library = r.games;
+      renderHome();
+      if (state.tab === "library") renderLibrary(false);
+      if (toastIt) toast("Library refreshed", "ok");
+    }
+  }).catch(() => { refreshing = false; });
+}
+
+/* ------------------------------ Renders ------------------------------- */
+function renderAll() {
+  renderHome();
+  renderLibrary(false);
+  renderSettings();
+}
+
+/* ------------------------------ Boot --------------------------------- */
+async function boot() {
+  const r = await post("boot");
+  if (!r || !r.config) { toast("Bridge unavailable — dev mock mode", "warn"); r.config = state.config; r.library = { games: mockGames() }; }
+  state.config = Object.assign({}, state.config, r.config || {});
+  state.library = (r.library && r.library.games) || [];
+  state.status = r.status || {};
+  applyTheme();
+  paintStatus(state.status);
+  const idn = r.identity || {};
+  $("#home-greeting").textContent = "Welcome back, " + (idn.user || "gamer");
+  renderAll();
+  setTimeout(() => {
+    const home = $(".screen[data-screen=home]");
+    indexFocus(home);
+    focusFirst(home);
+  }, 200);
+}
+
+function setupSlider(key, value, min, max, onchange) {
+  SLIDERS[key] = { value, min, max, el: null, onchange, active: false };
+  const el = document.querySelector('[data-slider="' + key + '"]');
+  SLIDERS[key].el = el;
+  if (el) renderSlider(key);
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  $$("#tabs button").forEach((b) => b.addEventListener("click", () => setTab(b.dataset.tab)));
+  $("#searchbtn").addEventListener("click", openSearch);
+  $("#quickbtn").addEventListener("click", toggleQuick);
+  // Mouse nav: hovering focuses, clicking confirms.
+  document.addEventListener("mousedown", (e) => {
+    const f = e.target.closest("[data-x][data-y]");
+    if (f) { focus(f, false); }
+  });
+  $("#quickmenu").addEventListener("click", (e) => {
+    const el = e.target.closest("[data-action]");
+    if (el && el.dataset.action !== "set") runAction(el.dataset.action, el);
+  });
+  boot();
+});
+</script>
+</body>
+</html>

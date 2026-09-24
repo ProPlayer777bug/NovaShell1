@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=NovaShell
+Comment=Console-style desktop shell for Ubuntu
+Exec=@BINARY@
+Terminal=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+X-GNOME-Autostart-Phase=Applications
