@@ -140,6 +140,7 @@ fn curated_app(
     icon_name: Option<&str>,
     platform: Option<&str>,
     rom_exts: Vec<String>,
+    installed: bool,
 ) -> Game {
     let key = PathBuf::from(program)
         .file_name()
@@ -158,37 +159,64 @@ fn curated_app(
         last_played: None,
         playtime_secs: 0,
         favorite: false,
-        installed: true,
+        installed,
         platform: platform.map(String::from),
         rom_exts,
     }
 }
 
+fn resolve_bin(cands: &[&str]) -> Option<String> {
+    cands.iter().find_map(|c| bin_ok(c))
+}
+
 /// Scan curated apps + emulators into library candidates.
+///
+/// The curated set is always listed so the home screen is never empty — tiles
+/// whose binary is missing are marked `installed: false` and the UI grey-bars
+/// them. The desktop provider still supplies a real entry when the binary is
+/// installed via a PATH it can see but the curated lookup could not (e.g.
+/// flatpak), because it only skips curated bins it knows are resolvable.
 pub fn scan_curated_games(_cfg: &Config) -> Vec<Game> {
     let mut out: Vec<Game> = Vec::new();
 
     for (title, icon, cands) in BROWSERS {
-        if let Some(bin) = cands.iter().find_map(|c| bin_ok(c)) {
-            out.push(curated_app(title, "app", &bin, Some(icon), None, Vec::new()));
+        match resolve_bin(cands) {
+            Some(bin) => out.push(curated_app(title, "app", &bin, Some(icon), None, Vec::new(), true)),
+            None => out.push(curated_app(title, "app", cands[0], Some(icon), None, Vec::new(), false)),
         }
     }
-    for (title, icon, cands) in FILE_MANAGERS {
-        if let Some(bin) = cands.iter().find_map(|c| bin_ok(c)) {
-            out.push(curated_app(title, "app", &bin, Some(icon), None, Vec::new()));
-            break;
-        }
+
+    // Exactly one file-manager tile: the first installed one, else Files.
+    let fm = FILE_MANAGERS
+        .iter()
+        .find(|(_, _, cands)| resolve_bin(cands).is_some())
+        .unwrap_or(&FILE_MANAGERS[0]);
+    match resolve_bin(fm.2) {
+        Some(bin) => out.push(curated_app(fm.0, "app", &bin, Some(fm.1), None, Vec::new(), true)),
+        None => out.push(curated_app(fm.0, "app", fm.2[0], Some(fm.1), None, Vec::new(), false)),
     }
+
     for def in EMULATORS {
-        if let Some(bin) = def.bins.iter().find_map(|c| bin_ok(c)) {
-            out.push(curated_app(
+        let exts = def.exts.iter().map(|e| e.to_string()).collect();
+        match resolve_bin(def.bins) {
+            Some(bin) => out.push(curated_app(
                 def.pretty,
                 "emulator",
                 &bin,
                 Some(def.icon),
                 Some(def.platform),
-                def.exts.iter().map(|e| e.to_string()).collect(),
-            ));
+                exts,
+                true,
+            )),
+            None => out.push(curated_app(
+                def.pretty,
+                "emulator",
+                def.bins[0],
+                Some(def.icon),
+                Some(def.platform),
+                exts,
+                false,
+            )),
         }
     }
     out
@@ -222,6 +250,13 @@ pub fn is_curated_bin(program: &str) -> bool {
 mod tests {
     use super::*;
     use crate::settings::Config;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// Serialises tests that mutate the process-wide `PATH`.
+    static PATH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    fn lock_path() -> MutexGuard<'static, ()> {
+        PATH_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     #[test]
     fn curated_bin_detection() {
@@ -249,9 +284,7 @@ mod tests {
     fn finds_curated_tiles_when_binaries_present() {
         // A temp dir with fake executables on PATH must surface curated tiles
         // with the right source / platform / rom extensions.
-        use std::sync::{Mutex, MutexGuard, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard: MutexGuard<'static, ()> = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = lock_path();
 
         let dir = tempfile::tempdir().unwrap();
         let bin_dir = dir.path();
@@ -291,11 +324,13 @@ mod tests {
             browsers.iter().map(|g| g.title.clone()).collect::<Vec<_>>()
         );
         assert!(browsers.iter().any(|g| g.title == "Brave"));
+        assert!(browsers.iter().any(|g| g.installed), "found binaries should be installed");
 
         let emus: Vec<_> = games.iter().filter(|g| g.source == "emulator").collect();
         let ps2 = emus.iter().find(|g| g.platform.as_deref() == Some("PS2"));
         assert!(ps2.is_some(), "PS2 tile expected");
         assert_eq!(ps2.unwrap().rom_exts, vec!["iso", "chd", "cso", "bin", "img", "gz"]);
+        assert!(ps2.unwrap().installed);
         assert!(
             emus
                 .iter()
@@ -303,6 +338,35 @@ mod tests {
                     program: bin_dir.join("rpcs3").to_string_lossy().to_string(),
                     args: vec![],
                 })
+        );
+    }
+
+    #[test]
+    fn always_lists_curated_tiles_when_binaries_missing() {
+        let _guard = lock_path();
+
+        let empty_dir = tempfile::tempdir().unwrap();
+        let old_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", empty_dir.path());
+        let games = scan_curated_games(&Config::default());
+        match old_path {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert_eq!(
+            games.iter().filter(|g| g.source == "app").count(),
+            BROWSERS.len() + 1,
+            "all browsers plus exactly one file manager should be listed even when missing"
+        );
+        assert_eq!(
+            games.iter().filter(|g| g.source == "emulator").count(),
+            EMULATORS.len(),
+            "all consoles should be listed even when missing"
+        );
+        assert!(
+            games.iter().all(|g| !g.installed),
+            "with an empty PATH every curated tile must be marked not installed"
         );
     }
 }

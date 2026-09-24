@@ -162,6 +162,8 @@
     overflow: hidden;
   }
   .card:hover { transform: translateY(-2px); border-color: var(--line-strong); }
+  .card.missing { opacity: 0.55; filter: saturate(0.4); }
+  .card.missing:hover { transform: none; border-color: var(--line-weak); box-shadow: none; }
   .card.focused {
     border-color: var(--accent);
     box-shadow: 0 0 0 2px var(--accent), 0 0 1.6rem rgba(var(--accent-rgb), 0.45);
@@ -809,6 +811,7 @@ function runAction(action, el) {
 function launchGame(id) {
   const game = state.library.find((g) => g.id === id);
   if (!game) return;
+  if (game.installed === false) { toast(game.title + " is not installed", "warn"); return; }
   if (game.source === "emulator") { openRomPicker(game); return; }
   toast("Launching " + game.title + " …");
   post("game:launch", { id }).then((r) => {
@@ -1222,11 +1225,13 @@ function gameCard(g, x, y) {
     : (g.icon
       ? '<div class="cover" style="background:linear-gradient(135deg,#232a44,#141827)"><img alt="" src="file://' + g.icon + '"></div>'
       : '<div class="cover"><div class="ph">' + "◈" + "</div></div>");
-  const subtitle = (g.source === "emulator")
-    ? (g.platform ? "Boot a " + g.platform + " game" : "Pick a ROM")
-    : (g.playtime || "Never played");
+  const subtitle = !g.installed
+    ? "Not installed"
+    : (g.source === "emulator"
+      ? (g.platform ? "Boot a " + g.platform + " game" : "Pick a ROM")
+      : (g.playtime || "Never played"));
   return (
-    '<div class="card" data-x="' + x + '" data-y="' + y + '" data-action="launch" data-gid="' + g.id + '">' +
+    '<div class="card' + (g.installed ? "" : " missing") + '" data-x="' + x + '" data-y="' + y + '" data-action="launch" data-gid="' + g.id + '">' +
       '<div class="badges">' + badge + "</div>" +
       cover +
       '<div class="meta"><span class="title">' + esc(g.title) + "</span>" +
