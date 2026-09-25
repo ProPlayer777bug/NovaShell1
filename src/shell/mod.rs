@@ -324,26 +324,53 @@ struct HelperWindow {
     title: String,
 }
 
+/// Wait until the display reports a usable monitor size.
+///
+/// When the shell starts as a service during WSLg start-up, the display can
+/// briefly report a 0x0 monitor; sizing to that produced a tiny 640x480 window.
+fn wait_for_monitor(max_wait: Duration) -> Option<(i32, i32)> {
+    let deadline = Instant::now() + max_wait;
+    loop {
+        if let Some(size) = current_monitor_size() {
+            if size.0 >= 640 && size.1 >= 480 {
+                return Some(size);
+            }
+        }
+        if Instant::now() >= deadline {
+            return current_monitor_size();
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// The primary monitor's size, or `None` while the display is not ready.
+fn current_monitor_size() -> Option<(i32, i32)> {
+    let disp = gtk::gdk::Display::default()?;
+    use gtk::gdk::prelude::MonitorExt;
+    use gtk::gio::prelude::ListModelExt;
+    let mon = disp
+        .monitors()
+        .item(0)
+        .and_then(|o| o.downcast::<gtk::gdk::Monitor>().ok())?;
+    let g = MonitorExt::geometry(&mon);
+    Some((g.width(), g.height()))
+}
+
 /// Window size for windowed mode. Clamped to the monitor minus frame headroom
 /// and to 1440x860 absolute: the Windows desktop here is 1536x960 logical
 /// (1920x1200 physical at 125% scaling) while WSLg's X root reports
 /// 1920x1200, so a window sized to the full X root can land outside the
 /// visible desktop and show nothing but a taskbar entry.
 fn fitted_window_size() -> (i32, i32) {
-    let (mut w, mut h) = (1280, 720);
-    if let Some(disp) = gtk::gdk::Display::default() {
-        use gtk::gdk::prelude::MonitorExt;
-        use gtk::gio::prelude::ListModelExt;
-        if let Some(mon) = disp
-            .monitors()
-            .item(0)
-            .and_then(|o| o.downcast::<gtk::gdk::Monitor>().ok())
-        {
-            let g = MonitorExt::geometry(&mon);
-            w = (g.width() - 80).max(640);
-            h = (g.height() - 120).max(480);
-        }
-    }
+    let (w, h) = match current_monitor_size() {
+        // A degenerate (0x0) report means the display is not up yet: use a
+        // sensible default rather than shrinking to the minimum.
+        Some((mw, mh)) if mw >= 640 && mh >= 480 => (
+            (mw - 80).max(640),
+            (mh - 120).max(480),
+        ),
+        _ => (1280, 720),
+    };
     (w.min(1440), h.min(860))
 }
 
@@ -496,11 +523,24 @@ fn activate(
     if opts.fullscreen {
         window.fullscreen();
     } else {
+        // The display may still be coming up when we start as a service; sizing
+        // to a 0x0 monitor would give a tiny window.
+        let _ = wait_for_monitor(Duration::from_secs(10));
         let (w, h) = fitted_window_size();
         log::debug!("windowed size {w}x{h}");
         window.set_default_size(w, h);
     }
-window.present();
+    window.present();
+    // If the monitor only reported its real size after we mapped, re-apply the
+    // fitted size so the window is never left tiny or off-screen.
+    if !(opts.fullscreen && !opts.windowed) {
+        let win = window.clone();
+        glib::timeout_add_local(Duration::from_millis(2500), move || {
+            let (w, h) = fitted_window_size();
+            win.set_default_size(w, h);
+            glib::ControlFlow::Break
+        });
+    }
     // Under WSLg the surface does not always get keyboard focus on map;
     // force it onto the WebView right away and re-assert it for a few
     // seconds in case the compositor hands focus back to the terminal.
