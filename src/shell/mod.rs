@@ -624,16 +624,28 @@ fn wait_for_monitor(max_wait: Duration) -> Option<(i32, i32)> {
 }
 
 /// The primary monitor's size, or `None` while the display is not ready.
+///
+/// The *largest* usable monitor is chosen rather than index 0: after a WSLg
+/// display reset the list can contain a stale tiny monitor first, and sizing to
+/// it left the shell in a 640x480 window while the real screen was much bigger.
 fn current_monitor_size() -> Option<(i32, i32)> {
     let disp = gtk::gdk::Display::default()?;
     use gtk::gdk::prelude::MonitorExt;
-    use gtk::gio::prelude::ListModelExt;
-    let mon = disp
-        .monitors()
-        .item(0)
-        .and_then(|o| o.downcast::<gtk::gdk::Monitor>().ok())?;
-    let g = MonitorExt::geometry(&mon);
-    Some((g.width(), g.height()))
+    let mut best: Option<(i32, i32)> = None;
+    for item in disp.monitors().into_iter().flatten() {
+        let Ok(mon) = item.downcast::<gtk::gdk::Monitor>() else {
+            continue;
+        };
+        let g = MonitorExt::geometry(&mon);
+        let (w, h) = (g.width(), g.height());
+        if w <= 0 || h <= 0 {
+            continue;
+        }
+        if best.map(|(bw, bh)| w * h > bw * bh).unwrap_or(true) {
+            best = Some((w, h));
+        }
+    }
+    best
 }
 
 /// Window size for windowed mode. Clamped to the monitor minus frame headroom
@@ -652,6 +664,25 @@ fn fitted_window_size() -> (i32, i32) {
         _ => (1280, 720),
     };
     (w.min(1440), h.min(860))
+}
+
+/// Re-apply the fitted size if the window is smaller than the display allows.
+///
+/// Under WSLg the monitor can be reported as a small or stale entry at start-up.
+/// Sizing to that produced a tiny window, or one positioned outside the visible
+/// desktop, which looked exactly like the shell had failed to launch.
+fn refit_window(state: &AppState) {
+    let (want_w, want_h) = fitted_window_size();
+    let (cur_w, cur_h) = state.window.default_size();
+    if cur_w >= want_w && cur_h >= want_h {
+        return; // already at least this large
+    }
+    log::info!("refitting window to {want_w}x{want_h} (display now ready)");
+    state.window.set_default_size(want_w, want_h);
+    if state.opts.fullscreen && !state.opts.windowed {
+        state.window.unfullscreen();
+    }
+    state.window.present();
 }
 
 /// Terminate the app this shell launched (if any). Launched apps get their own
@@ -790,6 +821,21 @@ pub fn run(opts: RunOptions) -> Result<()> {
     let main_loop = glib::MainLoop::new(None, false);
     let state_slot = activate(&main_loop, &opts)?;
     eprintln!("NovaShell: window presented, entering main loop");
+
+    // The display can settle after the window is up: a WSLg start-up can report
+    // a tiny or phantom monitor first, which left the shell in a 640x480 window
+    // (or off-screen) on a much larger display. Re-fit once things are stable so
+    // a bad start-up measurement corrects itself.
+    if opts.windowed {
+        for delay_ms in [1500_u32, 5000, 12000] {
+            let slot = state_slot.clone();
+            glib::timeout_add_local_once(Duration::from_millis(delay_ms.into()), move || {
+                if let Some(state) = slot.borrow().as_ref() {
+                    refit_window(state);
+                }
+            });
+        }
+    }
     main_loop.run();
     // Quitting the shell must not leave a launched app (and its helper
     // processes) running; take the whole process group down with us.
