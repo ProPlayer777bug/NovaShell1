@@ -17,6 +17,7 @@ pub mod integrations;
 pub mod launcher;
 pub mod plugins;
 pub mod roms;
+pub mod runtime;
 pub mod settings;
 #[cfg(target_os = "linux")]
 pub mod system;

@@ -102,6 +102,10 @@ pub struct Config {
     /// Extra directories scanned for native games (.desktop style entries).
     #[serde(default)]
     pub game_dirs: Vec<PathBuf>,
+    /// Additional storage roots for Wine/Proton prefixes, e.g. a games drive.
+    /// The default prefix root always applies; these are extra locations.
+    #[serde(default)]
+    pub prefix_roots: Vec<PathBuf>,
     #[serde(default)]
     pub launchers: LauncherConfig,
     #[serde(default)]
@@ -129,6 +133,7 @@ impl Default for Config {
             performance_mode: default_bool_false(),
             fullscreen: default_bool_true(),
             game_dirs: vec![],
+            prefix_roots: vec![],
             launchers: LauncherConfig::default(),
             controller: ControllerConfig::default(),
             screenshot_mode: default_screenshot_mode(),

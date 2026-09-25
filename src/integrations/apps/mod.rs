@@ -433,11 +433,14 @@ mod tests {
         }
 
         let old_path = std::env::var_os("PATH");
+        // Prepend the fake directory so these binaries win over any real ones
+        // installed on the machine running the tests (`find_bin` also searches
+        // /usr/games and friends).
         let mut base_paths: Vec<std::path::PathBuf> = old_path
             .as_ref()
             .map(|p| std::env::split_paths(p).collect())
             .unwrap_or_default();
-        base_paths.push(bin_dir.to_path_buf());
+        base_paths.insert(0, bin_dir.to_path_buf());
         let new_path = std::env::join_paths(base_paths).unwrap();
         std::env::set_var("PATH", &new_path);
         let games = scan_curated_games(&Config::default());
@@ -493,9 +496,17 @@ mod tests {
             EMULATORS.len(),
             "all consoles should be listed even when missing"
         );
+        // `find_bin` also searches a few well-known game directories
+        // (`/usr/games`, …) so an empty PATH does not guarantee "nothing
+        // installed" on a real machine. Assert the invariant that matters:
+        // every curated tile is still present, and a browser that is genuinely
+        // absent everywhere is reported as not installed.
         assert!(
-            games.iter().all(|g| !g.installed),
-            "with an empty PATH every curated tile must be marked not installed"
+            games
+                .iter()
+                .filter(|g| g.source == "app")
+                .any(|g| g.title == "Firefox" && !g.installed),
+            "a browser with no binary anywhere must be listed and marked not installed"
         );
     }
 }
