@@ -1,0 +1,25 @@
+[Unit]
+Description=NovaShell console shell
+Documentation=https://github.com/ProPlayer777bug/NovaShell1
+After=graphical-session.target
+
+[Service]
+Type=simple
+User=aara
+Environment=DISPLAY=:0
+Environment=HOME=/home/aara
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+WorkingDirectory=/home/aara
+# This WSL box has no display-manager logins, so the XDG runtime dir does not
+# exist and WebKit cannot start its web process (blank window). The "+" prefix
+# runs these with full privileges despite User=aara.
+ExecStartPre=+/bin/mkdir -p /run/user/1000
+ExecStartPre=+/bin/chown aara:aara /run/user/1000
+ExecStartPre=+/bin/chmod 700 /run/user/1000
+ExecStart=/usr/local/bin/novashell --windowed
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target
