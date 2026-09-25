@@ -1139,6 +1139,56 @@ fn status_payload(state: &AppState) -> Value {
     serde_json::to_value(snap).unwrap_or(Value::Null)
 }
 
+/// Read an image from disk and return it as a `data:` URI.
+///
+/// The UI runs on the `novashell://` origin, where WebKit refuses to load
+/// `file://` sub-resources, so icons are inlined instead of referenced.
+fn inline_image(path: Option<&std::path::Path>) -> Option<String> {
+    const MAX_BYTES: u64 = 3 * 1024 * 1024;
+    let path = path?;
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() == 0 || meta.len() > MAX_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "svg" => "image/svg+xml",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "xpm" => "image/x-xpixmap",
+        _ => return None,
+    };
+    Some(format!("data:{mime};base64,{}", base64_encode(&bytes)))
+}
+
+/// Minimal base64 encoder (avoids pulling in another dependency).
+fn base64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 fn game_json(g: &Game) -> Value {
     json!({
         "id": g.id,
@@ -1146,8 +1196,10 @@ fn game_json(g: &Game) -> Value {
         "source": g.source,
         "platform": g.platform,
         "rom_exts": g.rom_exts,
-        "favicon": g.icon.as_ref().map(|p| p.to_string_lossy().to_string()),
-        "artwork": g.artwork.as_ref().map(|p| p.to_string_lossy().to_string()),
+        // The UI renders g.icon; keep favicon as an alias for older payloads.
+        "icon": inline_image(g.icon.as_deref()),
+        "favicon": inline_image(g.icon.as_deref()),
+        "artwork": inline_image(g.artwork.as_deref()),
         "last_played": g.last_played.filter(|t| *t > 0),
         "playtime": format_playtime(g.playtime_secs),
         "playtime_secs": g.playtime_secs,
@@ -1501,16 +1553,31 @@ fn play_game_file(path: &str) -> Result<()> {
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
 
-    // Pick the emulator for this file: an installed one wins, so a bare ".iso"
-    // does not land on PSX (often not installed) when PCSX2 is.
+    // Pick the console. The folder the file sits in is the strongest signal:
+    // a game in ~/PS2 is a PS2 game even though ".iso" is also a PSX/PS3/Wii
+    // extension, and choosing by extension alone sent PS2 games to RPCS3.
+    let folder = src
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let by_folder = |want: &str| {
+        integrations::apps::EMULATORS
+            .iter()
+            .find(|d| d.rom_dir.eq_ignore_ascii_case(want))
+    };
     let matching = integrations::apps::EMULATORS
         .iter()
         .filter(|d| d.exts.iter().any(|e| e.eq_ignore_ascii_case(&ext)))
         .collect::<Vec<_>>();
-    let chosen = matching
-        .iter()
-        .find(|d| d.bins.iter().any(|b| integrations::apps::find_bin(b).is_some()))
-        .copied()
+    let chosen = by_folder(&folder)
+        .filter(|d| d.bins.iter().any(|b| integrations::apps::find_bin(b).is_some()))
+        .or_else(|| {
+            matching
+                .iter()
+                .find(|d| d.bins.iter().any(|b| integrations::apps::find_bin(b).is_some()))
+                .copied()
+        })
         .or_else(|| matching.first().copied())
         .ok_or_else(|| anyhow!("no emulator handles '.{ext}' files"))?;
     let def = chosen;
@@ -1569,6 +1636,16 @@ fn copy_into(src: &std::path::Path, dir: &std::path::Path) -> Result<std::path::
         .file_name()
         .map(|n| n.to_os_string())
         .ok_or_else(|| anyhow!("game file has no name"))?;
+    let size = std::fs::metadata(src).map(|m| m.len()).unwrap_or(0);
+
+    // Already present with the same size: reuse it instead of making another
+    // multi-gigabyte duplicate.
+    let existing = dir.join(&name);
+    if existing.is_file() && std::fs::metadata(&existing).map(|m| m.len()).ok() == Some(size) {
+        log::info!("game already in {}: {}", dir.display(), name.to_string_lossy());
+        return Ok(existing);
+    }
+
     let mut dest = dir.join(&name);
     if dest.exists() {
         let stem = src
@@ -1587,7 +1664,18 @@ fn copy_into(src: &std::path::Path, dir: &std::path::Path) -> Result<std::path::
         }
     }
     log::info!("copying game into {}", dir.display());
-    std::fs::copy(src, &dest)?;
+    // Copy to a .part file and rename only when complete, so an interrupted copy
+    // can never be left behind looking like a playable game.
+    let part = dest.with_file_name(format!(
+        "{}.part",
+        dest.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+    ));
+    let _ = std::fs::remove_file(&part);
+    if let Err(e) = std::fs::copy(src, &part) {
+        let _ = std::fs::remove_file(&part);
+        return Err(anyhow!("copy failed: {e}"));
+    }
+    std::fs::rename(&part, &dest)?;
     Ok(dest)
 }
 

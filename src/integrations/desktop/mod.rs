@@ -96,6 +96,50 @@ pub fn find_icon(name: &str) -> Option<PathBuf> {
     if name.is_empty() {
         return None;
     }
+    if let Some(found) = find_icon_direct(name) {
+        return Some(found);
+    }
+    // Desktop entries often use a namespaced or capitalised icon name while the
+    // theme only ships the other spelling (e.g. "nautilus" vs
+    // "org.gnome.Nautilus", "retroarch" vs "com.libretro.RetroArch"). Aliases
+    // are resolved with the direct lookup only, so spellings that point at each
+    // other cannot recurse.
+    for alias in icon_aliases(name) {
+        if let Some(found) = find_icon_direct(&alias) {
+            return Some(found);
+        }
+    }
+    // Last resort: match a theme file case-insensitively by base name.
+    let lower = name.to_lowercase();
+    let home = dirs::home_dir();
+    let mut bases = vec![PathBuf::from("/usr/share/icons/hicolor")];
+    if let Some(h) = &home {
+        bases.push(h.join(".local/share/icons/hicolor"));
+    }
+    for base in bases {
+        for size in ["256x256", "128x128", "scalable", "48x48"] {
+            let apps = base.join(size).join("apps");
+            let Ok(entries) = std::fs::read_dir(&apps) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let fname = e.file_name().to_string_lossy().to_string();
+                let stem = fname.rsplit_once('.').map(|(s, _)| s).unwrap_or(&fname);
+                let ext = fname.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+                if matches!(ext, "png" | "svg" | "xpm") && stem.to_lowercase() == lower {
+                    return Some(e.path());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Look up one exact icon name (no alias expansion).
+fn find_icon_direct(name: &str) -> Option<PathBuf> {
+    if name.is_empty() {
+        return None;
+    }
     let name = name.strip_prefix("file://").unwrap_or(name).to_string();
     let p = PathBuf::from(&name);
     if p.is_absolute() && p.exists() {
@@ -132,6 +176,46 @@ pub fn find_icon(name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Alternative icon names to try when the requested one is not installed.
+fn icon_aliases(name: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let lower = name.to_lowercase();
+    let mut push = |candidate: &str| {
+        let c = candidate.to_string();
+        if c != name && !out.contains(&c) {
+            out.push(c);
+        }
+    };
+    match lower.as_str() {
+        "nautilus" | "org.gnome.nautilus" => {
+            push("org.gnome.Nautilus");
+            push("org.gnome.Nautilus.svg");
+            push("nautilus");
+        }
+        "retroarch" | "com.libretro.retroarch" => {
+            push("com.libretro.RetroArch");
+            push("retroarch");
+        }
+        "brave" | "brave-browser" | "brave-browser-stable" => {
+            push("brave-browser");
+            push("Brave");
+        }
+        "pcsx2" | "pcsx2-qt" => {
+            push("pcsx2-qt");
+            push("pcsx2-qt.svg");
+            push("PCSX2");
+        }
+        "files" | "org.gnome.files" => {
+            push("org.gnome.Nautilus");
+        }
+        "duckstation" | "org.duckstation.duckstation" => push("org.duckstation.DuckStation"),
+        "rpcs3" => push("rpcs3"),
+        "dolphin" | "dolphin-emu" => push("dolphin-emu"),
+        _ => {}
+    }
+    out
 }
 
 /// Scan desktop entries into library candidates.

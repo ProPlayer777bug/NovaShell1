@@ -156,8 +156,24 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(13.5rem, 1fr));
     gap: var(--gap);
+    align-items: start;
   }
   .grid.wide { grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr)); }
+
+  /* PS5-style row: a single horizontal strip of fixed-size tiles you slide
+     through with the right/left buttons instead of a stretching grid. */
+  .strip {
+    display: flex;
+    gap: var(--gap);
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0.2rem 0.2rem 0.7rem;
+    scroll-snap-type: x proximity;
+  }
+  .strip::-webkit-scrollbar { height: 0.45rem; }
+  .strip::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; }
+  .strip .card { flex: 0 0 14.5rem; scroll-snap-align: start; }
+  .strip .tile-empty { color: var(--text-faint); font-size: 0.85rem; padding: 0.8rem 0.2rem; }
 
   .card {
     position: relative;
@@ -1492,8 +1508,11 @@ function renderHome() {
     : '<div class="glow"></div><div class="content"><div class="eyebrow">Welcome to</div><div class="big">NovaShell</div><p style="color:var(--text-dim)">No games yet — add your launchers in Settings.</p></div>';
 
   const allBox = $("#all-grid");
-  $("#all-title").textContent = games.length ? "All apps (" + games.length + ")" : "All apps";
-  allBox.innerHTML = games.slice(0, 12).map((g, i) => gameCard(g, i, 0)).join("");
+  $("#all-title").textContent = games.length ? "All apps (" + games.length + ")  —  ◀ ▶ to slide" : "All apps";
+  allBox.className = "strip";
+  allBox.innerHTML = games.length
+    ? games.map((g, i) => gameCard(g, i, 0)).join("")
+    : '<div class="tile-empty">No apps yet.</div>';
 
   const actions = $("#home-actions");
   actions.innerHTML = [
@@ -1504,11 +1523,13 @@ function renderHome() {
   ].join("");
 
   const recentBox = $("#recent-grid");
+  recentBox.className = "strip";
   recentBox.innerHTML = recent.length ? recent.map((g, i) => gameCard(g, i, 0)).join("") :
-    '<div style="color:var(--text-dim);padding:0.6rem 0">Nothing played yet — your launches will appear here.</div>';
+    '<div class="tile-empty">Nothing played yet — your launches will appear here.</div>';
   const favBox = $("#fav-grid");
+  favBox.className = "strip";
   favBox.innerHTML = favs.length ? favs.map((g, i) => gameCard(g, i, 0)).join("") :
-    '<div style="color:var(--text-dim);padding:0.6rem 0">No favorites yet.</div>';
+    '<div class="tile-empty">No favorites yet.</div>';
 }
 
 function act(x, y, action, icon, label, hint) {
