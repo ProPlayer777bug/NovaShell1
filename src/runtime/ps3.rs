@@ -244,10 +244,42 @@ pub fn check_install_prereqs(pkg: &Path) -> InstallPrereqs {
         );
     }
     if !out.license_found {
-        out.blockers.push(
+        // A common case is a stub file: a real .rap is a few KB, a placeholder
+        // is a few bytes. Say so, because "no licence" is otherwise baffling
+        // when a .rap is sitting right there in the folder.
+        let stubs: Vec<String> = pkg
+            .parent()
+            .map(|d| {
+                std::fs::read_dir(d)
+                    .map(|rd| {
+                        rd.flatten()
+                            .filter(|e| {
+                                matches!(
+                                    e.path()
+                                        .extension()
+                                        .map(|x| x.to_string_lossy().to_lowercase())
+                                        .as_deref(),
+                                    Some("rap") | Some("edat")
+                                )
+                            })
+                            .filter(|e| {
+                                e.metadata().map(|m| m.len() < MIN_LICENSE_BYTES).unwrap_or(false)
+                            })
+                            .map(|e| e.file_name().to_string_lossy().to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        out.blockers.push(if stubs.is_empty() {
             "No license file for this title. RPCS3 needs the matching .rap in its exdata folder."
-                .into(),
-        );
+                .into()
+        } else {
+            format!(
+                "The license file(s) {} are too small to be real (a genuine .rap is a few KB). Dump the license from your own console, or place a valid .rap next to the package.",
+                stubs.join(", ")
+            )
+        });
     }
     out
 }
@@ -500,6 +532,14 @@ mod tests {
         std::fs::write(dir.join("EP4049-NPEB00150_00-BRAID00000000001.rap"), vec![7u8; 4096]).unwrap();
         let pre = check_install_prereqs(&pkg);
         assert!(pre.license_found);
+
+        // A stub licence must be called out specifically, not just "missing".
+        std::fs::write(dir.join("EP4049-NPEB00150_00-BRAID00000000001.rap"), b"tiny").unwrap();
+        let pre = check_install_prereqs(&pkg);
+        assert!(pre
+            .blockers
+            .iter()
+            .any(|b| b.contains("too small")), "unexpected: {:?}", pre.blockers);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -76,6 +76,24 @@ impl ProcessManager {
         self.list().into_iter().filter(|p| p.is_running()).collect()
     }
 
+    /// Move a session from one pid to another.
+    ///
+    /// Wine and Proton do not keep the pid the shell spawned: `wine` forks
+    /// `app.exe` and exits, and the Proton wrapper execs through python. The
+    /// window is then owned by a different process, often in its own process
+    /// group, so the tracked pid goes stale while the app keeps running. This
+    /// re-keys the session onto the real window owner.
+    pub fn rekey(&self, from: u32, to: u32) -> bool {
+        if let Ok(mut map) = self.sessions.lock() {
+            if let Some(mut info) = map.remove(&from) {
+                info.pid = to;
+                map.insert(to, info);
+                return true;
+            }
+        }
+        false
+    }
+
     /// Mark a session as finished and forget it.
     pub fn finish(&self, pid: u32, code: i32) {
         if let Ok(mut map) = self.sessions.lock() {

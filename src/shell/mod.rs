@@ -425,6 +425,57 @@ fn process_alive(pid: u32) -> bool {
     crate::runtime::procs::process_alive(pid)
 }
 
+/// Every visible X window id, used to spot windows that appear after a launch.
+fn list_window_ids() -> Vec<String> {
+    std::process::Command::new("xdotool")
+        .args(["search", "--onlyvisible", "--name", "."])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(|l| l.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The pid that owns an X window.
+fn window_owner_pid(window: &str) -> Option<u32> {
+    let out = std::process::Command::new("xdotool")
+        .args(["getwindowpid", window])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// Find the process that really owns the window a launch just produced.
+///
+/// `wine foo.exe` and Proton both replace the process the shell spawned: the
+/// spawned pid exits almost immediately while the app runs on as a different
+/// pid, usually in its own process group. Tracking the spawned pid therefore
+/// made the session look dead (and close on nothing) while the app was running.
+/// This watches for a window that was not there before the launch and returns
+/// its owning pid.
+fn adopt_window_owner(spawned: u32, before: &[String], wait: Duration) -> Option<u32> {
+    let deadline = Instant::now() + wait;
+    while Instant::now() < deadline {
+        for w in list_window_ids() {
+            if before.contains(&w) {
+                continue;
+            }
+            if let Some(owner) = window_owner_pid(&w) {
+                if owner != spawned && owner > 1 && process_alive(owner) {
+                    return Some(owner);
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(400));
+    }
+    None
+}
+
 /// Ask X11 which windows belong to a pid, newest last.
 ///
 /// A launched app often does not own its own window: Chromium forks a zygote,
@@ -524,6 +575,33 @@ fn close_window(pid: u32) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+}
+
+/// Close a Wine application.
+///
+/// A Wine app runs as `<app>.exe` with a shared `wineserver` behind it. The
+/// polite window close usually ends the app, but the wineserver outlives it and
+/// keeps the prefix locked, so it is shut down too once nothing is left.
+fn close_wine_session(pid: u32) {
+    close_window(pid);
+    if process_alive(pid) {
+        return;
+    }
+    let remaining: Vec<String> = std::process::Command::new("pgrep")
+        .arg("-u")
+        .arg(crate::util::user_name())
+        .arg("-x")
+        .arg("wineserver")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(|l| l.to_string()).collect())
+        .unwrap_or_default();
+    for server in remaining {
+        let _ = std::process::Command::new("kill")
+            .arg(&server)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
 }
 
 /// Wait until the display reports a usable monitor size.
@@ -1296,7 +1374,18 @@ fn route(state: &AppState, msg: Value) {
         "windows:close" => {
             let pid = msg["pid"].as_u64().unwrap_or(0) as u32;
             if pid > 0 {
-                close_window(pid);
+                // A Wine session also needs its wineserver shut down, or the
+                // prefix stays locked for the next launch.
+                let is_wine = state
+                    .procs
+                    .get(pid)
+                    .map(|p| p.runtime == "wine" || p.runtime == "proton")
+                    .unwrap_or(false);
+                if is_wine {
+                    close_wine_session(pid);
+                } else {
+                    close_window(pid);
+                }
                 state.procs.finish(pid, 0);
                 state.helpers.borrow_mut().retain(|h| h.pid != pid);
                 // Read the pid out before the mutable borrow: borrowing and
@@ -2311,7 +2400,7 @@ fn launch_windows_app(state: &AppState, app: &crate::runtime::apps::WindowsApp) 
         anyhow::bail!("executable is missing: {}", app.executable.display());
     }
 
-    let runtimes = crate::runtime::registry();
+    let mut runtimes = crate::runtime::registry();
     let mut target = crate::runtime::LaunchTarget::new(&app.id, &app.name)
         .with_executable(app.executable.clone())
         .with_game(matches!(app.kind, crate::runtime::apps::AppKind::WindowsGame));
@@ -2321,7 +2410,9 @@ fn launch_windows_app(state: &AppState, app: &crate::runtime::apps::WindowsApp) 
     target.working_dir = app.working_directory.clone();
     target.runtime_override = Some(app.runtime.clone());
 
-    let runtime = crate::runtime::select(&runtimes, &target)
+    // Detect before choosing: an undetected Wine reports "missing", which used
+    // to make a plain Windows app fall through to Proton.
+    let runtime = crate::runtime::select_detected(&mut runtimes, &target)
         .ok_or_else(|| anyhow!("no runtime available for {}", app.runtime))?;
     let checks = runtime.validate(&target);
     if let Some(bad) = checks.iter().find(|c| !c.ok) {
@@ -2350,19 +2441,40 @@ fn launch_windows_app(state: &AppState, app: &crate::runtime::apps::WindowsApp) 
     // of waiting for the next poll.
     let sender = state.sender.clone();
     let title = app.name.clone();
+    let procs = state.procs.clone();
+    let windows_before = list_window_ids();
+    let spawned = pid;
     std::thread::Builder::new()
         .name("novashell-wine-watch".into())
         .spawn(move || {
+            // `wine` and Proton hand off to another process: the loader exits
+            // at once and the app runs on under a different pid (often in its
+            // own group). Adopt the window's real owner so the taskbar keeps
+            // the app and closing it actually reaches it.
+            let mut tracked = spawned;
+            if let Some(owner) =
+                adopt_window_owner(spawned, &windows_before, Duration::from_secs(12))
+            {
+                log::info!("{title}: window owner is pid {owner}");
+                if procs.rekey(spawned, owner) {
+                    let _ = sender.send(
+                        json!({ "event": "_session_rekeyed", "_internal": true,
+                                "from": spawned, "to": owner })
+                        .to_string(),
+                    );
+                    tracked = owner;
+                }
+            }
             // Clear the entry when the app is gone, however it exits.
             let deadline = Instant::now() + Duration::from_secs(60 * 60 * 24);
             while Instant::now() < deadline {
-                if !process_alive(pid) {
+                if !process_alive(tracked) {
                     let _ = sender.send(
                         json!({
                             "event": "application.exited",
                             "_internal": true,
                             "title": title,
-                            "pid": pid,
+                            "pid": tracked,
                         })
                         .to_string(),
                     );
@@ -2998,6 +3110,9 @@ fn spawn_background(state: &AppState, spec: &Spec) -> Result<u32> {
 
 fn launch_spec(state: &AppState, spec: &Spec, library_id: Option<&str>) -> Result<()> {
     log::info!("launching: {}", spec.name);
+    // Snapshot the windows before spawning so the one that appears can be
+    // attributed to this launch.
+    let windows_before = list_window_ids();
     let child = crate::launcher::spawn(spec)?;
     let title = spec.name.clone();
     let pid = child.id();
@@ -3027,6 +3142,8 @@ fn launch_spec(state: &AppState, spec: &Spec, library_id: Option<&str>) -> Resul
     send_event(state, json!({ "event": "game_start", "title": title }));
 
     let sender = state.sender.clone();
+    let procs = state.procs.clone();
+    let label = title.clone();
     // Do NOT hide the shell: launched apps open as normal windows on top of
     // NovaShell (the way Chrome opens over a desktop), and the taskbar in the
     // shell is used to switch between them or close them.
@@ -3046,6 +3163,20 @@ fn launch_spec(state: &AppState, spec: &Spec, library_id: Option<&str>) -> Resul
             None
         };
         if let Some(code) = early_exit {
+            // The spawned process handed off to another one (Wine, Proton) and
+            // exited straight away. Adopt the process that owns the window it
+            // produced, otherwise the taskbar would drop a running app and
+            // closing it would signal nothing.
+            if let Some(owner) = adopt_window_owner(pid, &windows_before, Duration::from_secs(10)) {
+                log::info!("{label}: adopted window owner pid {owner}");
+                if procs.rekey(pid, owner) {
+                    let _ = sender.send(
+                        json!({ "event": "_session_rekeyed", "_internal": true,
+                                "from": pid, "to": owner })
+                        .to_string(),
+                    );
+                }
+            }
             if hide_mode {
                 let _ = sender.send(
                     json!({ "event": "_launch_failed", "_internal": true, "title": title, "code": code })
@@ -3153,6 +3284,20 @@ fn handle_core_event(state: &AppState, v: &Value) {
         if pid != 0 {
             state.procs.finish(pid, 0);
             state.helpers.borrow_mut().retain(|h| h.pid != pid);
+        }
+    }
+    if v.get("_internal").and_then(|x| x.as_bool()).unwrap_or(false)
+        && v["event"].as_str() == Some("_session_rekeyed")
+    {
+        // A launch handed off to a different process (Wine/Proton); move the
+        // foreground session onto the pid that now owns the window.
+        let from = v["from"].as_u64().unwrap_or(0) as u32;
+        let to = v["to"].as_u64().unwrap_or(0) as u32;
+        if from != 0 && to != 0 {
+            if let Some(mut session) = state.running.borrow_mut().remove(&from) {
+                session.pid = to;
+                state.running.borrow_mut().insert(to, session);
+            }
         }
     }
     ui::dispatch(&state.webview, v);

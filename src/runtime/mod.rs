@@ -261,6 +261,10 @@ pub fn validate_runtime(runtime_id: &str, target: &LaunchTarget) -> Vec<Check> {
 
 /// Pick the runtime that should handle a target, honouring an explicit
 /// override. Games prefer Proton, normal Windows applications prefer Wine.
+///
+/// Detection has already happened on these runtimes (see [`detect_all`] and
+/// [`select_detected`]); a fresh registry reports Wine as missing, which used
+/// to make selection fall through to Proton for ordinary `.exe` apps.
 pub fn select<'a>(runtimes: &'a [Box<dyn Runtime>], target: &LaunchTarget) -> Option<&'a dyn Runtime> {
     if let Some(want) = &target.runtime_override {
         return runtimes.iter().find(|r| &r.info().id == want).map(|r| r.as_ref());
@@ -276,6 +280,26 @@ pub fn select<'a>(runtimes: &'a [Box<dyn Runtime>], target: &LaunchTarget) -> Op
     } else {
         by_kind(RuntimeKind::WindowsApp).or_else(|| by_kind(RuntimeKind::WindowsGame))
     }
+}
+
+/// Detect every runtime, then choose one.
+///
+/// This is what launching must use: a fresh `WineRuntime` has no executable
+/// until `detect` runs, so selecting from a fresh registry picked Proton for a
+/// plain Windows app (Wine looked "missing") and then failed to build a spec.
+pub fn select_detected<'a>(
+    runtimes: &'a mut [Box<dyn Runtime>],
+    target: &LaunchTarget,
+) -> Option<&'a dyn Runtime> {
+    for r in runtimes.iter_mut() {
+        // Detect anything not already known to be available. Checking only for
+        // `Unknown` was not enough: a fresh Wine reports `Missing` (it has no
+        // executable yet), so it was never probed and stayed invisible.
+        if !r.info().status.is_available() {
+            r.detect();
+        }
+    }
+    select(runtimes, target)
 }
 
 #[cfg(test)]
@@ -320,6 +344,81 @@ mod tests {
         ]);
         let t = LaunchTarget::new("app-1", "Notepad");
         assert_eq!(select(&rs, &t).unwrap().info().id, "wine");
+    }
+
+    /// A runtime that reports "unknown" must be detected before selection.
+    /// This is the case that launched Notepad through Proton: a fresh Wine
+    /// reports Missing, so selection fell through and Proton aborted.
+    struct Undetected {
+        id: &'static str,
+        kind: RuntimeKind,
+        present: bool,
+        detected: std::cell::Cell<bool>,
+    }
+
+    impl Runtime for Undetected {
+        fn info(&self) -> RuntimeInfo {
+            let mut i = RuntimeInfo::new(self.id, self.id, self.kind);
+            // Before detect() every runtime looks unavailable.
+            i.status = if self.detected.get() && self.present {
+                RuntimeStatus::Available
+            } else {
+                RuntimeStatus::Missing
+            };
+            i
+        }
+        fn detect(&mut self) -> RuntimeStatus {
+            self.detected.set(true);
+            if self.present {
+                RuntimeStatus::Available
+            } else {
+                RuntimeStatus::Missing
+            }
+        }
+        fn build_spec(&self, _t: &LaunchTarget) -> anyhow::Result<Spec> {
+            Ok(Spec::new(self.id, self.id))
+        }
+    }
+
+    #[test]
+    fn selection_detects_first_so_wine_is_not_skipped() {
+        // Models the real registry: Proton is Available as soon as it is found,
+        // while a fresh Wine has not been detected and so looks Missing.
+        let mut fresh: Vec<Box<dyn Runtime>> = vec![
+            Box::new(Undetected {
+                id: "wine",
+                kind: RuntimeKind::WindowsApp,
+                present: true,
+                detected: std::cell::Cell::new(false),
+            }),
+            Box::new(Undetected {
+                id: "proton",
+                kind: RuntimeKind::WindowsGame,
+                present: true,
+                detected: std::cell::Cell::new(true),
+            }),
+        ];
+        let t = LaunchTarget::new("app-1", "Notepad");
+        // Selecting without detection launches Notepad through Proton.
+        assert_eq!(select(&fresh, &t).unwrap().info().id, "proton");
+
+        let mut detected: Vec<Box<dyn Runtime>> = vec![
+            Box::new(Undetected {
+                id: "wine",
+                kind: RuntimeKind::WindowsApp,
+                present: true,
+                detected: std::cell::Cell::new(false),
+            }),
+            Box::new(Undetected {
+                id: "proton",
+                kind: RuntimeKind::WindowsGame,
+                present: true,
+                detected: std::cell::Cell::new(true),
+            }),
+        ];
+        // The launch path uses select_detected, which gets it right.
+        assert_eq!(select_detected(&mut detected, &t).unwrap().info().id, "wine");
+        let _ = &mut fresh;
     }
 
     #[test]

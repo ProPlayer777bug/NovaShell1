@@ -4,3 +4,15 @@ __pycache__/
 *.log
 *.ser
 serial.log
+
+# Console firmware and license blobs are large, proprietary and machine
+# specific. They belong in RPCS3/Wine on the machine, never in this history:
+# a committed blob cannot be removed, bloats every clone, and is not source.
+*.PUP
+*.pup
+*.rap
+*.RAP
+*.edat
+*.EDAT
+*.bios
+*.bin

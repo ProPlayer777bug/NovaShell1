@@ -273,6 +273,15 @@ impl Runtime for ProtonRuntime {
             spec = spec.env("STEAM_COMPAT_DATA_PATH", prefix.to_string_lossy().to_string());
             spec = spec.env("WINEPREFIX", prefix.join("pfx").to_string_lossy().to_string());
         }
+        // proton.py reads STEAM_COMPAT_CLIENT_INSTALL_PATH unconditionally and
+        // aborts with a KeyError when it is missing, so it is always set to
+        // the directory containing the build.
+        if let Some(parent) = build.script.parent() {
+            spec = spec.env(
+                "STEAM_COMPAT_CLIENT_INSTALL_PATH",
+                parent.to_string_lossy().to_string(),
+            );
+        }
         for (k, v) in security::filter_env(&target.env) {
             spec = spec.env(k, v);
         }
@@ -340,6 +349,13 @@ mod tests {
         assert_eq!(spec.args[1], "run");
         assert_eq!(spec.args[2], exe.to_string_lossy().to_string());
         assert_eq!(spec.args[3], "-dx11");
+        // proton.py aborts with a KeyError when this is missing.
+        let client = spec
+            .env
+            .iter()
+            .find(|(k, _)| k == "STEAM_COMPAT_CLIENT_INSTALL_PATH")
+            .map(|(_, v)| v.clone());
+        assert_eq!(client, Some(dir.to_string_lossy().to_string()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
