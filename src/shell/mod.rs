@@ -313,6 +313,10 @@ struct AppState {
     /// Helper windows opened by the shell (file manager, chooser) shown in the
     /// taskbar so the user can switch back to them or close them.
     helpers: Rc<RefCell<Vec<HelperWindow>>>,
+    /// Base URL of the loopback server that fronts the UI document and icons.
+    ui_base: String,
+    /// Icon/artwork path map served by that server, kept fresh on refresh.
+    ui_icons: Arc<Mutex<std::collections::HashMap<String, std::path::PathBuf>>>,
     main_loop: glib::MainLoop,
     opts: RunOptions,
 }
@@ -459,6 +463,133 @@ fn print_help() {
     eprintln!("  --watchdog     supervise the shell and restart on crash");
 }
 
+/// A tiny loopback HTTP server for the UI document and its icons.
+///
+/// This WebKit build refuses to render both `data:` and `file://` images when
+/// the page itself is loaded from a custom scheme, which is why app icons came
+/// out as black boxes. Serving the UI over `http://127.0.0.1` gives the page a
+/// normal same-origin context, so icons load.
+struct UiServer {
+    base: String,
+    icons: Arc<Mutex<std::collections::HashMap<String, std::path::PathBuf>>>,
+}
+
+fn start_ui_server(
+    html: String,
+    icons: std::collections::HashMap<String, std::path::PathBuf>,
+) -> Result<UiServer> {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    let base = format!("http://127.0.0.1:{port}/");
+    let icons = Arc::new(Mutex::new(icons));
+    let icon_map = icons.clone();
+
+    std::thread::Builder::new()
+        .name("novashell-uiserver".into())
+        .spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let icons = icon_map.clone();
+                let html = html.clone();
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(match stream.try_clone() {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    });
+                    let mut request_line = String::new();
+                    if reader.read_line(&mut request_line).is_err() {
+                        return;
+                    }
+                    // Drain headers.
+                    let mut line = String::new();
+                    while let Ok(n) = reader.read_line(&mut line) {
+                        if n == 0 || line == "\r\n" || line == "\n" {
+                            break;
+                        }
+                        line.clear();
+                    }
+                    let path = request_line
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .to_string();
+
+                    let (ctype, body): (&str, Vec<u8>) = if path == "/" || path.starts_with("/?") {
+                        ("text/html; charset=utf-8", html.into_bytes())
+                    } else if path.starts_with("/icon/") || path.starts_with("/art/") {
+                        let want_art = path.starts_with("/art/");
+                        let raw_id = path
+                            .trim_start_matches("/icon/")
+                            .trim_start_matches("/art/")
+                            .split('?')
+                            .next()
+                            .unwrap_or("");
+                        let key = if want_art {
+                            format!("art:{}", percent_decode(raw_id))
+                        } else {
+                            percent_decode(raw_id)
+                        };
+                        let found = icons.lock().ok().and_then(|m| m.get(&key).cloned());
+                        match found {
+                            Some(file) => {
+                                let mime = match file
+                                    .extension()
+                                    .map(|e| e.to_string_lossy().to_lowercase())
+                                    .unwrap_or_default()
+                                    .as_str()
+                                {
+                                    "svg" => "image/svg+xml",
+                                    "jpg" | "jpeg" => "image/jpeg",
+                                    "webp" => "image/webp",
+                                    "xpm" => "image/x-xpixmap",
+                                    _ => "image/png",
+                                };
+                                match std::fs::read(&file) {
+                                    Ok(bytes) => (mime, bytes),
+                                    Err(_) => ("text/plain", b"unreadable".to_vec()),
+                                }
+                            }
+                            None => ("text/plain", b"no image".to_vec()),
+                        }
+                    } else {
+                        ("text/plain", b"not found".to_vec())
+                    };
+
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.write_all(&body);
+                    let _ = stream.flush();
+                    let _ = (&mut stream).read(&mut []);
+                });
+            }
+        })?;
+    Ok(UiServer { base, icons })
+}
+
+/// Decode `%XX` escapes in a URL path segment.
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn activate(
     main_loop: &glib::MainLoop,
     opts: &RunOptions,
@@ -480,6 +611,24 @@ fn activate(
             library.all_sorted().len()
         );
     }
+
+    // Serve the UI over loopback HTTP: this WebKit build refuses to render
+    // data: and file: images on a custom-scheme page, which left every app icon
+    // as an empty box. Same-origin http makes icons (and artwork) load.
+    let mut icon_map: std::collections::HashMap<String, std::path::PathBuf> =
+        Default::default();
+    for g in library.all_sorted() {
+        if let Some(p) = &g.icon {
+            icon_map.insert(g.id.clone(), p.clone());
+        }
+        if let Some(p) = &g.artwork {
+            icon_map.insert(format!("art:{}", g.id), p.clone());
+        }
+    }
+    let server = start_ui_server(ui_html(), icon_map)?;
+    let ui_base = server.base.clone();
+    let ui_icons = server.icons.clone();
+    log::info!("UI served from {ui_base}");
 
     let ucm = webkit6::UserContentManager::new();
     if !ucm.register_script_message_handler(ui::namespace(), None) {
@@ -639,8 +788,8 @@ fn activate(
         glib::ControlFlow::Continue
     });
 
-    let html = ui_html();
-    webview.load_html(&html, Some("novashell://ui/"));
+    // Load over loopback HTTP so same-origin icon requests succeed.
+    webview.load_uri(&ui_base);
 
     *state_slot.borrow_mut() = Some(AppState {
         webview,
@@ -652,6 +801,8 @@ fn activate(
         sender,
         running: Rc::new(RefCell::new(None)),
         helpers: Rc::new(RefCell::new(Vec::new())),
+        ui_base,
+        ui_icons,
         main_loop: main_loop.clone(),
         opts: opts.clone(),
     });
@@ -1148,16 +1299,33 @@ fn refresh_library(state: &AppState) -> Vec<Value> {
     lib.merge(found);
     lib.prune_missing(&seen, true);
     let _ = lib.save();
-    lib.all_sorted().iter().map(game_json).collect()
+    let base = state.ui_base.clone();
+    // Keep the served icon map in step with the library.
+    if let Ok(mut map) = state.ui_icons.lock() {
+        map.clear();
+        for g in lib.all_sorted() {
+            if let Some(p) = &g.icon {
+                map.insert(g.id.clone(), p.clone());
+            }
+            if let Some(p) = &g.artwork {
+                map.insert(format!("art:{}", g.id), p.clone());
+            }
+        }
+    }
+    lib.all_sorted()
+        .iter()
+        .map(|g| game_json(g, &base))
+        .collect()
 }
 
 fn boot_payload(state: &AppState) -> Value {
+    let base = state.ui_base.clone();
     let games: Vec<Value> = state
         .library
         .borrow()
         .all_sorted()
         .iter()
-        .map(game_json)
+        .map(|g| game_json(g, &base))
         .collect();
     json!({
         "ok": true,
@@ -1179,57 +1347,20 @@ fn status_payload(state: &AppState) -> Value {
     serde_json::to_value(snap).unwrap_or(Value::Null)
 }
 
-/// Read an image from disk and return it as a `data:` URI.
+/// Serialize a game for the UI.
 ///
-/// The UI runs on the `novashell://` origin, where WebKit refuses to load
-/// `file://` sub-resources, so icons are inlined instead of referenced.
-fn inline_image(path: Option<&std::path::Path>) -> Option<String> {
-    const MAX_BYTES: u64 = 3 * 1024 * 1024;
-    let path = path?;
-    let meta = std::fs::metadata(path).ok()?;
-    if meta.len() == 0 || meta.len() > MAX_BYTES {
-        return None;
-    }
-    let bytes = std::fs::read(path).ok()?;
-    let ext = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    let mime = match ext.as_str() {
-        "png" => "image/png",
-        "svg" => "image/svg+xml",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "xpm" => "image/x-xpixmap",
-        _ => return None,
-    };
-    Some(format!("data:{mime};base64,{}", base64_encode(&bytes)))
-}
-
-/// Minimal base64 encoder (avoids pulling in another dependency).
-fn base64_encode(data: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-        out.push(TABLE[(n >> 18) as usize & 63] as char);
-        out.push(TABLE[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[n as usize & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
-}
-
-fn game_json(g: &Game) -> Value {
+/// `icon_base` is the loopback HTTP server that fronts the UI: this WebKit
+/// build blocks both `data:` and `file://` images on a custom-scheme page, so
+/// icons are served over the same `http://127.0.0.1` origin as the document.
+fn game_json(g: &Game, icon_base: &str) -> Value {
+    let icon = g
+        .icon
+        .as_ref()
+        .map(|_| format!("{icon_base}icon/{}", url_encode(&g.id)));
+    let artwork = g
+        .artwork
+        .as_ref()
+        .map(|_| format!("{icon_base}art/{}", url_encode(&g.id)));
     json!({
         "id": g.id,
         "title": g.title,
@@ -1237,9 +1368,9 @@ fn game_json(g: &Game) -> Value {
         "platform": g.platform,
         "rom_exts": g.rom_exts,
         // The UI renders g.icon; keep favicon as an alias for older payloads.
-        "icon": inline_image(g.icon.as_deref()),
-        "favicon": inline_image(g.icon.as_deref()),
-        "artwork": inline_image(g.artwork.as_deref()),
+        "icon": icon,
+        "favicon": icon,
+        "artwork": artwork,
         "last_played": g.last_played.filter(|t| *t > 0),
         "playtime": format_playtime(g.playtime_secs),
         "playtime_secs": g.playtime_secs,
@@ -1247,6 +1378,22 @@ fn game_json(g: &Game) -> Value {
         "installed": g.installed,
     })
 }
+
+/// Percent-encode the characters that can appear in a library id, so it is
+/// safe to use as a URL path segment.
+fn url_encode(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for b in raw.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 
 fn settings_set(state: &AppState, msg: &Value) {
     let mut cfg = state.config.borrow().clone();

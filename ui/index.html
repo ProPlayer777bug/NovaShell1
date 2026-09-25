@@ -1453,14 +1453,25 @@ function ic(name) {
 }
 
 /* ------------------------- Game card renderer ------------------------ */
+// Icons arrive as same-origin http:// URLs from the shell's loopback server
+// (this WebKit build blocks data: and file: images). Be tolerant of any form.
+function imgSrc(v) {
+  if (!v) return "";
+  if (/^(data:|https?:|file:)/.test(v)) return v;
+  if (v.startsWith("/")) return "file://" + v;
+  return v;
+}
+
 function gameCard(g, x, y) {
   const src = { steam: "Steam", heroic: "Heroic", desktop: "Native", manual: "Manual", app: "App", emulator: g.platform || "Emulator" }[g.source] || g.source;
   const badge = (g.favorite ? '<span class="badge fav">' + ic("star").replace('width="18"', 'width="10"').replace('height="18"', 'height="10"') + '</span>' : "") + '<span class="badge">' + src + "</span>";
+  const hasIcon = !!(g.artwork || g.icon);
   const cover = g.artwork
-    ? '<div class="cover"><img alt="" src="file://' + g.artwork + '"></div>'
+    ? '<div class="cover"><img alt="" src="' + esc(imgSrc(g.artwork)) + '" onerror="this.outerHTML=\'' + monogram(g.title).replace(/'/g, "&#39;") + '\'"></div>'
     : (g.icon
-      ? '<div class="cover" style="background:linear-gradient(135deg,#232a44,#141827)"><img alt="" src="file://' + g.icon + '"></div>'
+      ? '<div class="cover" style="background:linear-gradient(135deg,#232a44,#141827)"><img alt="" src="' + esc(imgSrc(g.icon)) + '" onerror="this.outerHTML=\'' + monogram(g.title).replace(/'/g, "&#39;") + '\'"></div>'
       : '<div class="cover">' + monogram(g.title) + "</div>");
+  void hasIcon;
   const subtitle = !g.installed
     ? "Not installed"
     : (g.source === "emulator"
