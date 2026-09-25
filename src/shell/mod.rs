@@ -1081,7 +1081,7 @@ fn route(state: &AppState, msg: Value) {
 
         "runtimes:detect" => {
             let runtimes = crate::runtime::detect_all();
-            let _ = send_event(state, json!({ "event": "runtime.detected", "runtimes": runtimes }));
+            send_event(state, json!({ "event": "runtime.detected", "runtimes": runtimes }));
             reply(
                 state,
                 id,
@@ -1144,7 +1144,7 @@ fn route(state: &AppState, msg: Value) {
             };
             match crate::runtime::prefixes::delete(kind, &app_id) {
                 Ok(()) => {
-                    let _ = send_event(state, json!({ "event": "prefix.deleted", "id": app_id }));
+                    send_event(state, json!({ "event": "prefix.deleted", "id": app_id }));
                     reply(state, id, json!({ "ok": true }));
                 }
                 Err(e) => reply(state, id, json!({ "ok": false, "error": e.to_string() })),
@@ -1247,7 +1247,7 @@ fn route(state: &AppState, msg: Value) {
                     if let Err(e) = add_windows_app_to_library(state, &app) {
                         log::warn!("could not add {} to library: {e}", app.name);
                     }
-                    let _ = send_event(state, json!({ "event": "application.installed", "app": app }));
+                    send_event(state, json!({ "event": "application.installed", "app": app }));
                     reply(state, id, json!({ "ok": true, "app": app }));
                 }
                 Err(e) => reply(state, id, json!({ "ok": false, "error": e.to_string() })),
@@ -1269,7 +1269,7 @@ fn route(state: &AppState, msg: Value) {
             };
             let _ = state.library.borrow_mut().delete_key(&app_id);
             let _ = state.library.borrow_mut().save();
-            let _ = send_event(state, json!({ "event": "library_changed" }));
+            send_event(state, json!({ "event": "library_changed" }));
             match result {
                 Ok(()) => reply(state, id, json!({ "ok": true })),
                 Err(e) => reply(state, id, json!({ "ok": false, "error": e.to_string() })),
@@ -1404,7 +1404,7 @@ fn route(state: &AppState, msg: Value) {
             let mut decisions = crate::runtime::decisions::Decisions::load();
             decisions.remember(std::path::Path::new(&path), &runtime);
             crate::runtime::decisions::Decisions::clear_pending(std::path::Path::new(&path));
-            let _ = send_event(state, json!({ "event": "windows.file_decided", "path": path, "runtime": runtime }));
+            send_event(state, json!({ "event": "windows.file_decided", "path": path, "runtime": runtime }));
             reply(state, id, json!({ "ok": true }));
         }
 
@@ -2525,7 +2525,7 @@ fn watch_opened_games(exts: &[String], game_id: &str) -> Vec<Value> {
         None => {
             // First call: remember the current state, report nothing yet.
             guard.insert(game_id.to_string(), snapshot);
-            return Vec::new();
+            Vec::new()
         }
         Some(previous) => {
             let mut result = Vec::new();
@@ -2540,7 +2540,7 @@ fn watch_opened_games(exts: &[String], game_id: &str) -> Vec<Value> {
                 }
             }
             guard.insert(game_id.to_string(), snapshot);
-            return result;
+            result
         }
     }
 }
@@ -2692,11 +2692,10 @@ fn handle_core_event(state: &AppState, v: &Value) {
     }
     if v.get("_internal").and_then(|x| x.as_bool()).unwrap_or(false)
         && v["event"].as_str() == Some("_install_done")
+        && v["ok"].as_bool().unwrap_or(false)
     {
-        if v["ok"].as_bool().unwrap_or(false) {
-            log::info!("install finished; refreshing library");
-            refresh_library(state);
-        }
+        log::info!("install finished; refreshing library");
+        refresh_library(state);
     }
     if v.get("_internal").and_then(|x| x.as_bool()).unwrap_or(false)
         && v["event"].as_str() == Some("game_exit")

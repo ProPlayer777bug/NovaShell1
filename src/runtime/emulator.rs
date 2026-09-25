@@ -54,7 +54,7 @@ pub fn emulator_runtimes() -> Vec<Box<dyn Runtime>> {
 impl Runtime for EmulatorRuntime {
     fn info(&self) -> RuntimeInfo {
         let mut info = RuntimeInfo::new(&self.id(), self.def.pretty, RuntimeKind::Emulator)
-            .with_types(&self.def.exts)
+            .with_types(self.def.exts)
             .with_platforms(&[self.def.platform])
             .with_capabilities(&[Capability::Launch]);
         info.executable = self.resolved_bin().map(Into::into);

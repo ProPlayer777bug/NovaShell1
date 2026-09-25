@@ -54,7 +54,7 @@ impl WineRuntime {
         let deadline = std::time::Instant::now() + Duration::from_millis(1500);
         loop {
             if let Ok(Some(status)) = out.try_wait() {
-                return status.success().then(|| String::new());
+                return status.success().then_some(String::new());
             }
             if std::time::Instant::now() > deadline {
                 let _ = out.kill();

@@ -103,7 +103,8 @@ pub fn first_installed_file_manager() -> Option<String> {
 pub fn is_emulator_bin(name: &str) -> bool {
     EMULATORS
         .iter()
-        .any(|def| def.bins.iter().any(|b| *b == name))
+        .flat_map(|def| def.bins.iter())
+        .any(|b| *b == name)
 }
 
 pub struct EmulatorDef {
@@ -173,6 +174,7 @@ pub const EMULATORS: &[EmulatorDef] = &[
     },
 ];
 
+#[allow(clippy::too_many_arguments)]
 fn curated_app(
     title: &str,
     source: &str,

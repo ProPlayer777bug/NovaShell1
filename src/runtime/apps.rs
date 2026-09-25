@@ -316,12 +316,10 @@ pub fn find_installed_executables(prefix: &Path, limit: usize) -> Vec<PathBuf> {
             let p = e.path();
             match e.file_type() {
                 Ok(ft) if ft.is_dir() => stack.push(p),
-                Ok(ft) if ft.is_file() => {
-                    if is_windows_executable(&p) && !is_installer(&p) {
-                        found.push(p);
-                        if found.len() >= limit {
-                            break;
-                        }
+                Ok(ft) if ft.is_file() && is_windows_executable(&p) && !is_installer(&p) => {
+                    found.push(p);
+                    if found.len() >= limit {
+                        break;
                     }
                 }
                 _ => {}
