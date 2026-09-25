@@ -203,7 +203,20 @@
     overflow: hidden;
     position: relative;
   }
-  .card .cover img { width: 100%; height: 100%; object-fit: cover; }
+  /* Tile art is scaled to fit and never cropped: most entries carry square
+     app/emulator icons, and a cropped tile cut the logos off.
+     The image is absolutely positioned so its box is definite (an in-flow
+     image in the centred grid keeps its intrinsic size instead, and SVG icons
+     then overflow the tile). object-fit on that definite box scales both PNGs
+     and viewBox-only SVGs to fit. */
+  .card .cover img {
+    position: absolute; inset: 0.3rem;
+    width: auto; height: auto;
+    max-width: calc(100% - 0.6rem); max-height: calc(100% - 0.6rem);
+    object-fit: contain;
+  }
+  .card .cover.icon-tile { background: linear-gradient(135deg, #232a44, #141827); }
+  .card .cover img.icon { inset: 0.5rem; max-width: calc(100% - 1rem); max-height: calc(100% - 1rem); }
   .card .cover .ph { font-size: 2rem; opacity: 0.5; }
   .card .meta { display: flex; flex-direction: column; gap: 0.2rem; padding: 0 0.2rem 0.3rem; }
   .card .title { font-weight: 700; font-size: 0.98rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -322,6 +335,31 @@
   .swatches { display: flex; gap: 0.6rem; margin-top: 0.5rem; }
   .swatch { width: 2.2rem; height: 2.2rem; border-radius: 0.7rem; cursor: pointer; border: 2px solid transparent; }
   .swatch.focused { border-color: #fff; box-shadow: 0 0 0.8rem rgba(var(--accent-rgb),0.5); }
+
+  /* ------------------------- Runtime manager -------------------------- */
+  .pill {
+    font-size: 0.66rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 0.2rem 0.55rem; border-radius: 999px; flex: 0 0 auto;
+    border: 1px solid transparent; white-space: nowrap;
+  }
+  .pill.ok { color: #34d399; border-color: rgba(52,211,153,0.45); background: rgba(52,211,153,0.12); }
+  .pill.warn { color: #fbbf24; border-color: rgba(251,191,36,0.45); background: rgba(251,191,36,0.12); }
+  .pill.bad { color: #f87171; border-color: rgba(248,113,113,0.45); background: rgba(248,113,113,0.12); }
+  .pill.idle { color: var(--text-dim); border-color: var(--line-strong); }
+  .rt-note { font-size: 0.72rem; color: var(--text-faint); font-family: var(--mono); margin-top: 0.15rem; word-break: break-all; }
+  .rt-acts { display: flex; gap: 0.5rem; flex: 0 0 auto; }
+  .rt-acts .mini {
+    font-size: 0.7rem; font-weight: 600; padding: 0.3rem 0.7rem; border-radius: 0.5rem;
+    background: rgba(255,255,255,0.08); border: 1px solid var(--line); color: var(--text);
+  }
+  .rt-acts .mini:hover { border-color: var(--accent); }
+  .rt-acts .mini.danger { color: #f87171; border-color: rgba(248,113,113,0.35); }
+  .rt-log {
+    font-family: var(--mono); font-size: 0.7rem; color: var(--text-dim);
+    background: rgba(0,0,0,0.28); border: 1px solid var(--line); border-radius: 0.6rem;
+    padding: 0.6rem 0.8rem; max-height: 11rem; overflow: auto; white-space: pre-wrap;
+  }
+  .rt-log .err { color: #f87171; }
 
   /* ------------------------------ Sliders ---------------------------- */
   .slider-row { flex: 1 1 auto; display: flex; align-items: center; gap: 0.8rem; }
@@ -528,6 +566,7 @@
     <nav id="tabs">
       <button data-tab="home" class="active">Home</button>
       <button data-tab="library">Library</button>
+      <button data-tab="runtime-manager">Runtimes</button>
       <button data-tab="settings">Settings</button>
     </nav>
     <div id="clockwrap">
@@ -575,6 +614,11 @@
       <div id="empty-state" hidden><strong>Nothing here yet</strong>Launch a launcher and press Refresh in Settings.</div>
     </section>
 
+    <section class="screen" data-screen="runtime-manager">
+      <h2>Runtime Manager <span class="sub" id="rt-sub">Wine, Proton and native runtimes</span></h2>
+      <div class="settings-col" id="rt-col"></div>
+    </section>
+
     <section class="screen" data-screen="settings">
       <h2>Settings</h2>
       <div class="settings-col" id="settings-col"></div>
@@ -618,6 +662,22 @@
       </div>
       <div id="rom-list"></div>
       <div class="rom-hint" id="rom-hint">Pick a ROM to boot, or go up a folder.</div>
+    </div>
+  </div>
+
+  <div class="overlay" id="rt-ov">
+    <div class="rom-picker" style="max-width:34rem">
+      <div class="rom-head">
+        <div>
+          <div class="rom-title" id="rt-confirm-title">Are you sure?</div>
+          <div class="rom-path" id="rt-confirm-body"></div>
+        </div>
+        <button class="btn ghost" data-x="9" data-y="0" data-action="rt-confirm-close">✕</button>
+      </div>
+      <div class="playing-actions" style="justify-content:flex-end">
+        <button class="btn ghost" data-x="0" data-y="0" data-action="rt-confirm-close">Cancel</button>
+        <button class="btn" id="rt-confirm-yes" data-x="1" data-y="0" data-action="rt-confirm-yes">Confirm</button>
+      </div>
     </div>
   </div>
 
@@ -698,6 +758,17 @@ function mockReply(cmd, id) {
     "system:status": () => ({ cpu_usage_percent: 12, mem_percent: 38, network_up: true, controllers: [] }),
     "controller:list": () => ({ controllers: [] }),
     "system:identity": () => ({ user: "developer", host: "nova-dev" }),
+    "runtimes:detect": () => ({ ok: true, runtimes: [
+      { id: "native", name: "Native Linux", kind: "native", version: null, executable: null, capabilities: ["launch"], supported_file_types: [], supported_platforms: ["linux"], status: "available", config: {} },
+      { id: "wine", name: "Wine", kind: "windows_app", version: "10.0", executable: "/usr/bin/wine", capabilities: ["launch"], supported_file_types: ["exe", "msi"], supported_platforms: ["windows"], status: "available", config: {} },
+    ] }),
+    "runtimes:validate": () => ({ ok: true, checks: [{ id: "runtime", name: "Wine", ok: true }] }),
+    "prefixes:list": () => ({ ok: true, prefixes: [] }),
+    "procs:list": () => ({ ok: true, processes: [] }),
+    "windows:pending": () => ({ ok: true, pending: [] }),
+    "windows:associations": () => ({ ok: true }),
+    "windows:decide": () => ({ ok: true }),
+    "runtime:logs": () => ({ ok: true, lines: [] }),
   };
   const p = pending.get(id);
   if (!p) return;
@@ -769,6 +840,20 @@ function handleEvent(msg) {
     }
     case "_rom_cancelled":
       stopRomWatch();
+      break;
+    case "runtime.detected":
+    case "prefix.created":
+    case "prefix.deleted":
+    case "windows.file_decided":
+      if (state.tab === "runtime-manager") rtRefresh();
+      break;
+    case "application.installation.started":
+      toast("Installing " + (msg.id || "app") + " …");
+      if (state.tab === "runtime-manager") rtRefresh();
+      break;
+    case "application.installation.failed":
+      toast("Install failed: " + (msg.error || "unknown"), "warn");
+      if (state.tab === "runtime-manager") rtRefresh();
       break;
   }
 }
@@ -852,6 +937,7 @@ function confirm() {
 
 function back() {
   if (nav.current && nav.current.hasAttribute("data-active-slider")) { exitSlider(); return; }
+  if ($("#rt-ov").classList.contains("open")) { rtConfirmClose(); return; }
   if (quickOpen()) { closeQuick(); return; }
   if (romOpen()) { closeRomPicker(); return; }
   if (searchOpen()) { closeSearch(); return; }
@@ -922,6 +1008,32 @@ function runAction(action, el) {
     case "set": settingsSet(el); break;
     case "swatch": settingsSetSwatch(el.dataset.swatch); break;
     case "dep-close": closeQuick(); break;
+    case "rt-rescan":
+      toast("Rescanning runtimes …");
+      post("runtimes:detect").then(() => rtRefresh());
+      break;
+    case "rt-validate": rtValidate(el.dataset.rt); break;
+    case "rt-logs": rtShowLog(el.dataset.id); break;
+    case "rt-log-close": state.rt.logFor = null; renderRuntimeManager(); break;
+    case "rt-assoc":
+      post("windows:associations").then((r) => {
+        if (r && r.ok === false) toast(r.error || "Could not register the file handlers", "warn");
+        else toast("Windows files will ask in NovaShell", "ok");
+      });
+      break;
+    case "px-repair": rtPxAction("prefixes:repair", el.dataset.id, el.dataset.kind); break;
+    case "px-delete":
+      rtConfirmDelete(
+        "Delete prefix " + el.dataset.id + "?",
+        "Games and apps keep working — the prefix is rebuilt on the next launch.",
+        () => rtPxAction("prefixes:delete", el.dataset.id, el.dataset.kind)
+      );
+      break;
+    case "proc-stop": rtPidAction("procs:stop", el.dataset.pid); break;
+    case "proc-kill": rtPidAction("procs:kill", el.dataset.pid); break;
+    case "wf-decide": rtDecide(el.dataset.path, el.dataset.runtime); break;
+    case "rt-confirm-close": rtConfirmClose(); break;
+    case "rt-confirm-yes": rtConfirmAccept(); break;
   }
 }
 
@@ -1020,7 +1132,8 @@ document.addEventListener("keydown", (e) => {
   else if (k === "PrintScreen" || k === "F2") { captureScreenshot(); }
   else if (k === "1") setTab("home");
   else if (k === "2") setTab("library");
-  else if (k === "3") setTab("settings");
+  else if (k === "3") setTab("runtime-manager");
+  else if (k === "4") setTab("settings");
 });
 
 function handleLeft() {
@@ -1069,7 +1182,7 @@ function handleController(msg) {
 }
 
 let tabIndex = 0;
-const TAB_NAMES = ["home", "library", "settings"];
+const TAB_NAMES = ["home", "library", "runtime-manager", "settings"];
 function cycleTab(d) { setTab(TAB_NAMES[(tabIndex + d + TAB_NAMES.length) % TAB_NAMES.length]); }
 
 /* ------------------------------ Tabs -------------------------------- */
@@ -1078,6 +1191,7 @@ function setTab(name) {
   tabIndex = TAB_NAMES.indexOf(name);
   $$(".screen").forEach((s) => s.classList.toggle("active", s.dataset.screen === name));
   $$("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+  if (name === "runtime-manager") rtRefresh();
   reindexCurrent();
 }
 
@@ -1465,13 +1579,15 @@ function imgSrc(v) {
 function gameCard(g, x, y) {
   const src = { steam: "Steam", heroic: "Heroic", desktop: "Native", manual: "Manual", app: "App", emulator: g.platform || "Emulator" }[g.source] || g.source;
   const badge = (g.favorite ? '<span class="badge fav">' + ic("star").replace('width="18"', 'width="10"').replace('height="18"', 'height="10"') + '</span>' : "") + '<span class="badge">' + src + "</span>";
-  const hasIcon = !!(g.artwork || g.icon);
+  // Artwork is a wide box image and fills the tile; app icons are square logos
+  // and are contained whole so they are never cropped. A failed image falls
+  // back to the monogram via imgFailed(), never via an inline onerror handler
+  // (embedding markup in an attribute corrupts the DOM when it contains quotes).
   const cover = g.artwork
-    ? '<div class="cover"><img alt="" src="' + esc(imgSrc(g.artwork)) + '" onerror="this.outerHTML=\'' + monogram(g.title).replace(/'/g, "&#39;") + '\'"></div>'
+    ? '<div class="cover"><img class="art" alt="" src="' + esc(imgSrc(g.artwork)) + '" data-mono="' + esc(g.title) + '"></div>'
     : (g.icon
-      ? '<div class="cover" style="background:linear-gradient(135deg,#232a44,#141827)"><img alt="" src="' + esc(imgSrc(g.icon)) + '" onerror="this.outerHTML=\'' + monogram(g.title).replace(/'/g, "&#39;") + '\'"></div>'
+      ? '<div class="cover icon-tile"><img class="icon" alt="" src="' + esc(imgSrc(g.icon)) + '" data-mono="' + esc(g.title) + '"></div>'
       : '<div class="cover">' + monogram(g.title) + "</div>");
-  void hasIcon;
   const subtitle = !g.installed
     ? "Not installed"
     : (g.source === "emulator"
@@ -1574,6 +1690,254 @@ function gameCardWithIndex(g, i) {
 }
 
 /* ------------------------------ Settings ----------------------------- */
+/* ---------------------- Runtime manager renderer --------------------- */
+state.rt = {
+  runtimes: [],
+  prefixes: [],
+  processes: [],
+  pending: [],
+  logFor: null,
+  logLines: [],
+  loading: false,
+};
+
+function rtStatusPill(status) {
+  const s = String(status || "unknown").toLowerCase();
+  if (s === "available") return '<span class="pill ok">Ready</span>';
+  if (s === "missing") return '<span class="pill bad">Missing</span>';
+  if (s === "degraded") return '<span class="pill warn">Degraded</span>';
+  if (s === "error") return '<span class="pill bad">Error</span>';
+  return '<span class="pill idle">Unknown</span>';
+}
+
+function rtSize(bytes) {
+  if (bytes === null || bytes === undefined) return "size unknown";
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1024) return mb.toFixed(1) + " MB";
+  return (mb / 1024).toFixed(2) + " GB";
+}
+
+function rtAgo(secs) {
+  if (!secs || secs < 0) return "";
+  if (secs < 60) return secs + "s";
+  if (secs < 3600) return Math.round(secs / 60) + "m";
+  return Math.round(secs / 3600) + "h";
+}
+
+function rtRefresh() {
+  if (state.rt.loading) return Promise.resolve();
+  state.rt.loading = true;
+  return Promise.all([
+    post("runtimes:detect").catch(() => null),
+    post("prefixes:list").catch(() => null),
+    post("procs:list").catch(() => null),
+    post("windows:pending").catch(() => null),
+  ]).then(([rt, px, pr, pend]) => {
+    state.rt.loading = false;
+    if (rt && rt.runtimes) state.rt.runtimes = rt.runtimes;
+    if (px && px.prefixes) state.rt.prefixes = px.prefixes;
+    if (pr && pr.processes) state.rt.processes = pr.processes;
+    if (pend && pend.pending) state.rt.pending = pend.pending;
+    if (state.tab === "runtime-manager") renderRuntimeManager();
+  }).catch(() => { state.rt.loading = false; });
+}
+
+function rtRuntimeRows() {
+  const rts = state.rt.runtimes || [];
+  if (!rts.length) {
+    return '<div class="row"><span class="info"><span class="k">No runtimes found</span><div class="d">Install Wine, Steam or Proton and press Rescan</div></span></div>';
+  }
+  return rts.map((r, i) => {
+    const kinds = { native: "Native", windows_game: "Windows game", windows_app: "Windows app", emulator: "Emulator" };
+    const kind = kinds[r.kind] || r.kind;
+    const bits = [];
+    if (r.version) bits.push("v" + r.version);
+    if (r.supported_file_types && r.supported_file_types.length) bits.push(r.supported_file_types.join(", "));
+    return '<div class="row" data-x="0" data-y="' + i + '" data-action="rt-validate" data-rt="' + esc(r.id) + '">' +
+      '<span class="info"><span class="k">' + esc(r.name) + '</span>' +
+      '<div class="d">' + esc(kind) + (bits.length ? "  ·  " + esc(bits.join("  ·  ")) : "") + "</div>" +
+      (r.executable ? '<div class="rt-note">' + esc(r.executable) + "</div>" : "") +
+      "</span>" + rtStatusPill(r.status) +
+      '<span class="rt-acts">' +
+      '<span class="mini" data-x="1" data-y="' + i + '" data-action="rt-logs" data-id="' + esc(r.id) + '">Logs</span>' +
+      "</span></div>";
+  }).join("");
+}
+
+function rtPrefixRows() {
+  const pxs = state.rt.prefixes || [];
+  if (!pxs.length) {
+    return '<div class="row"><span class="info"><span class="k">No prefixes yet</span><div class="d">Prefixes are created automatically the first time you run a Windows game or app</div></span></div>';
+  }
+  return pxs.map((p, i) =>
+    '<div class="row" data-x="0" data-y="' + (100 + i) + '">' +
+      '<span class="info"><span class="k">' + esc(p.id) + '</span>' +
+      '<div class="d">' + esc(p.kind) + "  ·  " + esc(rtSize(p.size_bytes)) + "</div>" +
+      '<div class="rt-note">' + esc(p.path) + "</div></span>" +
+      (p.exists ? '<span class="pill ok">Ready</span>' : '<span class="pill bad">Missing</span>') +
+      '<span class="rt-acts">' +
+      '<span class="mini" data-x="1" data-y="' + (100 + i) + '" data-action="px-repair" data-id="' + esc(p.id) + '" data-kind="' + esc(p.kind) + '">Repair</span>' +
+      '<span class="mini danger" data-x="2" data-y="' + (100 + i) + '" data-action="px-delete" data-id="' + esc(p.id) + '" data-kind="' + esc(p.kind) + '">Delete</span>' +
+      "</span></div>"
+  ).join("");
+}
+
+function rtProcessRows() {
+  const ps = state.rt.processes || [];
+  if (!ps.length) {
+    return '<div class="row"><span class="info"><span class="k">Nothing running</span><div class="d">Games and apps launched by NovaShell show up here with their runtime</div></span></div>';
+  }
+  const now = Math.floor(Date.now() / 1000);
+  return ps.map((p, i) =>
+    '<div class="row" data-x="0" data-y="' + (200 + i) + '">' +
+      '<span class="info"><span class="k">' + esc(p.title || p.app_id) + '</span>' +
+      '<div class="d">' + esc(p.runtime) + (p.runtime_version ? " " + esc(p.runtime_version) : "") + "  ·  pid " + esc(p.pid) + "  ·  " + esc(rtAgo(now - p.started_at)) + "</div>" +
+      '<div class="rt-note">' + esc(p.executable) + "</div></span>" +
+      rtStatusPill(p.state === "running" ? "available" : p.state === "exited" ? "missing" : "unknown") +
+      '<span class="rt-acts">' +
+      '<span class="mini" data-x="1" data-y="' + (200 + i) + '" data-action="proc-stop" data-pid="' + esc(p.pid) + '">Stop</span>' +
+      '<span class="mini danger" data-x="2" data-y="' + (200 + i) + '" data-action="proc-kill" data-pid="' + esc(p.pid) + '">Force</span>' +
+      "</span></div>"
+  ).join("");
+}
+
+function rtPendingRows() {
+  const files = state.rt.pending || [];
+  if (!files.length) {
+    return '<div class="row"><span class="info"><span class="k">No Windows files waiting</span><div class="d">Open a .exe or .msi from Files and it will appear here before anything runs</div></span></div>';
+  }
+  return files.map((f, i) => {
+    const name = String(f.path || "").split("/").pop();
+    const why = [];
+    if (f.is_installer) why.push("looks like an installer");
+    if (f.is_game) why.push("looks like a game");
+    (f.reasons || []).forEach((r) => why.push(r));
+    return '<div class="row" data-x="0" data-y="' + (300 + i) + '">' +
+      '<span class="info"><span class="k">' + esc(name) + '</span>' +
+      '<div class="d">Nothing has been run yet' + (why.length ? "  ·  " + esc(why.join(", ")) : "") + "</div>" +
+      '<div class="rt-note">' + esc(f.path) + "</div></span>" +
+      '<span class="pill warn">Confirm</span>' +
+      '<span class="rt-acts">' +
+      '<span class="mini" data-x="1" data-y="' + (300 + i) + '" data-action="wf-decide" data-path="' + esc(f.path) + '" data-runtime="wine">Wine</span>' +
+      '<span class="mini" data-x="2" data-y="' + (300 + i) + '" data-action="wf-decide" data-path="' + esc(f.path) + '" data-runtime="proton">Proton</span>' +
+      '<span class="mini danger" data-x="3" data-y="' + (300 + i) + '" data-action="wf-decide" data-path="' + esc(f.path) + '" data-runtime="never">Never</span>' +
+      "</span></div>";
+  }).join("");
+}
+
+function renderRuntimeManager() {
+  const col = $("#rt-col");
+  if (!col) return;
+  const pend = (state.rt.pending || []).length;
+  $("#rt-sub").textContent =
+    state.rt.runtimes.filter((r) => String(r.status).toLowerCase() === "available").length +
+    " runtimes ready" + (pend ? "  ·  " + pend + " file" + (pend > 1 ? "s" : "") + " waiting" : "");
+
+  const logPanel = state.rt.logFor
+    ? '<div class="panel"><h3>Log — ' + esc(state.rt.logFor) + '</h3><div class="rt-log">' +
+      (state.rt.logLines.length
+        ? state.rt.logLines.map((l) => '<div class="' + (/error|fail|fatal/i.test(l) ? "err" : "") + '">' + esc(l) + "</div>").join("")
+        : "<div>No log output recorded for this id yet.</div>") +
+      '</div><div class="row" data-x="0" data-y="390" data-action="rt-log-close"><span class="info"><span class="k">Close log</span></span></div></div>'
+    : "";
+
+  col.innerHTML =
+    '<div class="panel"><h3>Windows files waiting for you</h3>' + rtPendingRows() + "</div>" +
+    '<div class="panel"><h3>Runtimes</h3>' + rtRuntimeRows() +
+      '<div class="row" data-x="0" data-y="50" data-action="rt-rescan">' + ic("refresh") +
+      '<span class="info"><span class="k">Rescan runtimes</span><div class="d">Look for Wine, Steam, Proton and emulators again</div></span></div>' +
+      '<div class="row" data-x="0" data-y="51" data-action="rt-assoc"><span class="info"><span class="k">Handle .exe and .msi files here</span>' +
+      '<div class="d">Double-clicking a Windows file will ask in NovaShell instead of running it straight away</div></span></div>' +
+    "</div>" +
+    '<div class="panel"><h3>Prefixes</h3>' + rtPrefixRows() + "</div>" +
+    '<div class="panel"><h3>Running sessions</h3>' + rtProcessRows() + "</div>" +
+    logPanel;
+  reindexCurrent();
+}
+
+function rtValidate(id) {
+  post("runtimes:validate", { runtime: id }).then((r) => {
+    if (!r || !r.checks || !r.checks.length) { toast("Nothing to check for " + id, "warn"); return; }
+    const bad = r.checks.filter((c) => !c.ok);
+    const msg = r.checks.map((c) => (c.ok ? "ok" : "fail") + ": " + (c.name || c.id)).join("  ");
+    toast(msg, bad.length ? "warn" : "ok");
+  }).catch(() => toast("Could not validate " + id, "warn"));
+}
+
+function rtShowLog(id) {
+  post("runtime:logs", { id: id, lines: 300 }).then((r) => {
+    state.rt.logFor = id;
+    state.rt.logLines = (r && r.lines) || [];
+    renderRuntimeManager();
+    focusFirst($(".screen.active"));
+  }).catch(() => toast("Could not read the log", "warn"));
+}
+
+function rtPidAction(cmd, pid) {
+  post(cmd, { pid: Number(pid) || 0 }).then((r) => {
+    if (r && r.ok === false) toast(r.error || "That did not work", "warn");
+    setTimeout(rtRefresh, 400);
+  });
+}
+
+function rtPxAction(cmd, id, kind) {
+  post(cmd, { id: id, kind: kind }).then((r) => {
+    if (r && r.ok === false) { toast(r.error || "That did not work", "warn"); return; }
+    toast(cmd === "prefixes:delete" ? "Prefix deleted — it will be rebuilt next launch" : "Prefix repaired", "ok");
+    rtRefresh();
+  }).catch(() => toast("That did not work", "warn"));
+}
+
+function rtDecide(path, runtime) {
+  const name = String(path).split("/").pop();
+  if (runtime === "never") { rtConfirmDelete("Never run " + name + "?", "Only inspect, never run", () => rtSendDecision(path, runtime)); return; }
+  if (runtime === "wine" || runtime === "proton") {
+    rtConfirmRun(name, runtime, () => rtSendDecision(path, runtime));
+  }
+}
+
+function rtSendDecision(path, runtime) {
+  post("windows:decide", { path: path, runtime: runtime }).then((r) => {
+    if (r && r.ok === false) { toast(r.error || "Could not save that choice", "warn"); return; }
+    if (runtime === "never") { toast("This file will only be inspected from now on", "ok"); }
+    else { toast("Saved — double-clicking it uses " + runtime, "ok"); }
+    rtRefresh();
+  });
+}
+
+/* A tiny two-button overlay, reusing the established .overlay pattern. */
+function rtConfirmRun(name, runtime, onYes) {
+  rtConfirm("Run " + name + "?", "This starts the file with " + runtime + " in its own prefix.", "Run with " + runtime, onYes);
+}
+
+function rtConfirmDelete(title, body, onYes) {
+  rtConfirm(title, body, "Confirm", onYes);
+}
+
+let rtConfirmAction = null;
+function rtConfirm(title, body, yes, onYes) {
+  const ov = $("#rt-ov");
+  $("#rt-confirm-title").textContent = title;
+  $("#rt-confirm-body").textContent = body;
+  $("#rt-confirm-yes").textContent = yes;
+  rtConfirmAction = onYes;
+  ov.classList.add("open");
+  indexFocus(ov);
+  focus($("#rt-confirm-yes"));
+}
+
+function rtConfirmClose() {
+  $("#rt-ov").classList.remove("open");
+  rtConfirmAction = null;
+  if (state.tab === "runtime-manager") { reindexCurrent(); renderRuntimeManager(); focusFirst($(".screen.active")); }
+}
+
+function rtConfirmAccept() {
+  const fn = rtConfirmAction;
+  rtConfirmClose();
+  if (fn) fn();
+}
+
 function renderSettings() {
   const c = state.config;
   const launchers = [
@@ -1739,6 +2103,7 @@ function refreshLibrary(quiet, toastIt) {
 function renderAll() {
   renderHome();
   renderLibrary(false);
+  renderRuntimeManager();
   renderSettings();
   renderTaskbar();
 }
@@ -1767,6 +2132,11 @@ function startTaskbar() {
   if (taskbarTimer) return;
   taskbarTimer = setInterval(renderTaskbar, 2000);
   renderTaskbar();
+  // The runtime manager shows live session/prefix state, so it polls while it
+  // is the visible screen and stays quiet otherwise.
+  setInterval(() => {
+    if (state.tab === "runtime-manager" && !$("#rt-ov").classList.contains("open")) rtRefresh();
+  }, 4000);
 }
 
 /* ------------------------------ Boot --------------------------------- */
@@ -1782,6 +2152,7 @@ async function boot() {
   $("#home-greeting").textContent = "Welcome back, " + (idn.user || "gamer");
   renderAll();
   startTaskbar();
+  rtRefresh();
   setTimeout(() => {
     const home = $(".screen[data-screen=home]");
     indexFocus(home);
@@ -1800,6 +2171,18 @@ document.addEventListener("DOMContentLoaded", () => {
   $$("#tabs button").forEach((b) => b.addEventListener("click", () => setTab(b.dataset.tab)));
   $("#searchbtn").addEventListener("click", openSearch);
   $("#quickbtn").addEventListener("click", toggleQuick);
+  // A tile image that cannot load falls back to its monogram. This has to be a
+  // capturing listener because `error` does not bubble, and the replacement is
+  // built here rather than in an inline onerror attribute.
+  document.addEventListener("error", (e) => {
+    const img = e.target;
+    if (!img || img.tagName !== "IMG" || !img.dataset || !("mono" in img.dataset)) return;
+    const title = img.dataset.mono;
+    img.removeAttribute("data-mono");
+    const holder = document.createElement("div");
+    holder.innerHTML = monogram(title);
+    if (img.parentNode) img.parentNode.replaceChild(holder.firstChild, img);
+  }, true);
   // Mouse nav: hovering focuses, clicking confirms.
   document.addEventListener("mousedown", (e) => {
     const f = e.target.closest("[data-x][data-y]");
