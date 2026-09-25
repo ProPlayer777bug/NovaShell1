@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use crate::launcher::Spec;
 
 pub mod apps;
+pub mod decisions;
 pub mod emulator;
 pub mod logs;
 pub mod native;

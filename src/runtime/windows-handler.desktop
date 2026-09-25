@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Open with Nova Shell
+GenericName=Windows File Handler
+Comment=Choose how to run this Windows file (asks before running anything)
+Exec=novashell --win-file %f
+TryExec=novashell
+Terminal=false
+NoDisplay=true
+Categories=Game;Emulator;Utility;
+MimeType=application/x-ms-dos-executable;application/x-msi;application/x-bat;application/x-cmd;

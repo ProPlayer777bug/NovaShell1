@@ -130,6 +130,96 @@ pub fn is_windows_executable(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// XDG desktop entries for the Windows file associations, so double-clicking an
+/// `.exe`/`.msi` in the file manager goes through the Runtime Manager (which
+/// asks for confirmation) instead of trying to execute it directly.
+pub const HANDLER_DESKTOP_ENTRY: &str = include_str!("windows-handler.desktop");
+
+/// Install/refresh the Nova Windows handler associations for the given user.
+///
+/// Uses the per-user XDG directories so this needs no root: the handler lives
+/// in `~/.local/share/applications`, the mime definitions in
+/// `~/.local/share/mime`, and the defaults in `~/.config/mimeapps.list`.
+pub fn install_file_associations(user_home: &Path) -> anyhow::Result<()> {
+    let apps_dir = user_home.join(".local/share/applications");
+    let mime_dir = user_home.join(".local/share/mime/packages");
+    let mime_root = user_home.join(".local/share/mime");
+    std::fs::create_dir_all(&apps_dir)?;
+    std::fs::create_dir_all(&mime_dir)?;
+    std::fs::write(
+        apps_dir.join("novashell-windows-handler.desktop"),
+        HANDLER_DESKTOP_ENTRY,
+    )?;
+    std::fs::write(mime_dir.join("novashell-windows.xml"), windows_mime_xml())?;
+    set_default_handler(user_home)?;
+    // Refresh the user-local caches. These are best-effort: the files above are
+    // already correct without them, and the tools may not be installed.
+    quiet_status(&[
+        "update-desktop-database",
+        apps_dir.to_string_lossy().as_ref(),
+    ]);
+    quiet_status(&["update-mime-database", mime_root.to_string_lossy().as_ref()]);
+    for mime in WINDOWS_MIME_TYPES {
+        quiet_status(&[
+            "xdg-mime",
+            "default",
+            "novashell-windows-handler.desktop",
+            mime,
+        ]);
+    }
+    Ok(())
+}
+
+fn quiet_status(args: &[&str]) {
+    if let Some((program, rest)) = args.split_first() {
+        let _ = std::process::Command::new(program)
+            .args(rest)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+/// The mime types Nova claims handlers for.
+pub const WINDOWS_MIME_TYPES: [&str; 4] = [
+    "application/x-ms-dos-executable",
+    "application/x-msi",
+    "application/x-bat",
+    "application/x-cmd",
+];
+
+pub fn windows_mime_xml() -> String {
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<mime-info xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\">\n",
+    );
+    for (mime, glob, icon) in [
+        ("application/x-ms-dos-executable", "*.exe", "application-x-executable"),
+        ("application/x-msi", "*.msi", "package-x-generic"),
+        ("application/x-bat", "*.bat", "application-x-executable"),
+        ("application/x-cmd", "*.cmd", "application-x-executable"),
+    ] {
+        xml.push_str(&format!(
+            "  <mime-type type=\"{mime}\">\n    <comment>Windows file</comment>\n    <glob pattern=\"{glob}\"/>\n    <icon name=\"{icon}\"/>\n  </mime-type>\n"
+        ));
+    }
+    xml.push_str("</mime-info>\n");
+    xml
+}
+
+/// Set the default handler for the Windows mime types in a user's config.
+pub fn set_default_handler(user_home: &Path) -> anyhow::Result<()> {
+    let config = user_home.join(".config");
+    std::fs::create_dir_all(&config)?;
+    let mut list = String::from("[Default Applications]\n");
+    for mime in WINDOWS_MIME_TYPES {
+        list.push_str(&format!(
+            "{mime}=novashell-windows-handler.desktop\n"
+        ));
+    }
+    std::fs::write(config.join("mimeapps.list"), list)?;
+    Ok(())
+}
+
 /// Heuristic: does this look like an installer rather than the game itself?
 pub fn is_installer(path: &Path) -> bool {
     let ext = path
@@ -143,7 +233,20 @@ pub fn is_installer(path: &Path) -> bool {
         .file_stem()
         .map(|s| s.to_string_lossy().to_lowercase())
         .unwrap_or_default();
-    INSTALLER_NAMES.iter().any(|n| stem == *n)
+    if INSTALLER_NAMES.iter().any(|n| stem == *n) {
+        return true;
+    }
+    // Vendors prefix their installers, so match installer words as separate
+    // tokens: `RetroArena-Setup.exe`, `setup_2.1.exe`, `Fable Install.exe`.
+    // This must not fire on names that merely contain the letters, e.g.
+    // `SetupTest.exe` is a game, not an installer.
+    let tokens: Vec<&str> = stem
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    tokens
+        .iter()
+        .any(|t| INSTALLER_NAMES.contains(t) || *t == "installer" || *t == "installers")
 }
 
 /// Heuristics for "this executable is probably a game".
@@ -247,6 +350,17 @@ mod tests {
         assert!(is_installer(Path::new("/d/Install.exe")));
         assert!(is_installer(Path::new("/d/anything.msi")));
         assert!(!is_installer(Path::new("/d/MyGame.exe")));
+    }
+
+    #[test]
+    fn detects_vendored_installer_names() {
+        // Vendors prefix installers: token matching must catch these.
+        assert!(is_installer(Path::new("/d/RetroArena-Setup.exe")));
+        assert!(is_installer(Path::new("/d/setup_2.1.exe")));
+        assert!(is_installer(Path::new("/d/Retro Arena Installer.exe")));
+        // ...but a word that merely contains "setup" is not an installer.
+        assert!(!is_installer(Path::new("/d/SetupTest.exe")));
+        assert!(!is_installer(Path::new("/d/installation_tool.exe")));
     }
 
     #[test]

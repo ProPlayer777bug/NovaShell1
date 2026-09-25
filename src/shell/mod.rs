@@ -30,6 +30,13 @@ pub struct RunOptions {
     pub help: bool,
     /// `novashell --play <file>`: play a game file headlessly and exit.
     pub play: Option<String>,
+    /// `novashell --win-file <file>`: a Windows file was opened from the file
+    /// manager. It is inspected and queued for the user to confirm; it is never
+    /// executed by this process.
+    pub win_file: Option<String>,
+    /// `novashell --install-associations`: register Nova as the handler for
+    /// Windows file types. Run from the install script and the setup screen.
+    pub install_associations: bool,
 }
 
 /// Normalise `$HOME` so the data dirs (library, config, logs) are the same
@@ -146,6 +153,8 @@ pub fn parse_args() -> RunOptions {
         watchdog: false,
         help: false,
         play: None,
+        win_file: None,
+        install_associations: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -166,6 +175,15 @@ pub fn parse_args() -> RunOptions {
             other if other.starts_with("--play=") => {
                 o.play = Some(other["--play=".len()..].to_string())
             }
+            // File-manager handler for Windows files: inspect and queue for
+            // confirmation. This mode never executes the file.
+            "--win-file" => o.win_file = args.next(),
+            other if other.starts_with("--win-file=") => {
+                o.win_file = Some(other["--win-file=".len()..].to_string())
+            }
+            // `novashell --install-associations`: register the .exe/.msi
+            // handlers so the file manager routes them through this shell.
+            "--install-associations" => o.install_associations = true,
             _ => {}
         }
     }
@@ -444,6 +462,51 @@ pub fn run(opts: RunOptions) -> Result<()> {
         configure_graphics_backend();
         return play_game_file(&path);
     }
+
+    // Registering the Windows file associations is a one-shot system change,
+    // so it is an explicit flag rather than something a normal launch does.
+    if opts.install_associations {
+        let home = dirs::home_dir().unwrap_or_default();
+        crate::runtime::apps::install_file_associations(&home)?;
+        eprintln!("novashell: registered .exe/.msi handlers");
+        return Ok(());
+    }
+
+    // A Windows file was opened from the file manager. Inspect it, remember a
+    // previous decision if the user made one, and queue it for confirmation.
+    // Nothing is executed here.
+    if let Some(path) = opts.win_file.clone() {
+        normalize_home();
+        let file = std::path::PathBuf::from(&path);
+        if !file.is_file() {
+            eprintln!("novashell: not a file: {path}");
+            std::process::exit(1);
+        }
+        use crate::runtime::decisions::PendingAction;
+        let guess = crate::runtime::apps::guess_if_game(&file);
+        let remembered = crate::runtime::decisions::Decisions::load().get(&file).map(|s| s.to_string());
+        let action = match remembered.as_deref() {
+            Some("wine") => PendingAction::Wine,
+            Some("proton") => PendingAction::Proton,
+            Some("never") => PendingAction::InspectOnly,
+            _ => PendingAction::Ask,
+        };
+        crate::runtime::decisions::Decisions::default().add_pending(
+            crate::runtime::decisions::PendingFile {
+                path: file,
+                action,
+                is_game: guess.is_game,
+                is_installer: crate::runtime::apps::is_installer(std::path::Path::new(&path)),
+                reasons: guess.reasons,
+                created_at: util::unix_now(),
+            },
+        );
+        // If the shell is already running it picks the file up through the
+        // pending list; otherwise the next launch shows it in the UI.
+        eprintln!("novashell: queued {path} for confirmation in Nova Shell");
+        return Ok(());
+    }
+
 
     gtk::init().map_err(|e| anyhow!("GTK init failed (is a display available?): {e}"))?;
     eprintln!("NovaShell: gtk init ok");
@@ -1322,6 +1385,37 @@ fn route(state: &AppState, msg: Value) {
                     }
                 })
                 .ok();
+        }
+
+        // Files opened from the file manager that need a decision.
+        "windows:pending" => {
+            let pending = crate::runtime::decisions::Decisions::load_pending();
+            reply(state, id, json!({ "ok": true, "pending": pending }));
+        }
+
+        // Remember how this file should be handled next time.
+        "windows:decide" => {
+            let path = msg["path"].as_str().unwrap_or("").to_string();
+            let runtime = msg["runtime"].as_str().unwrap_or("never").to_string();
+            if path.is_empty() {
+                reply(state, id, json!({ "ok": false, "error": "no path" }));
+                return;
+            }
+            let mut decisions = crate::runtime::decisions::Decisions::load();
+            decisions.remember(std::path::Path::new(&path), &runtime);
+            crate::runtime::decisions::Decisions::clear_pending(std::path::Path::new(&path));
+            let _ = send_event(state, json!({ "event": "windows.file_decided", "path": path, "runtime": runtime }));
+            reply(state, id, json!({ "ok": true }));
+        }
+
+        // Install the .exe/.msi file associations so the file manager routes
+        // them through the Runtime Manager instead of executing them.
+        "windows:associations" => {
+            let home = dirs::home_dir().unwrap_or_default();
+            match crate::runtime::apps::install_file_associations(&home) {
+                Ok(()) => reply(state, id, json!({ "ok": true })),
+                Err(e) => reply(state, id, json!({ "ok": false, "error": e.to_string() })),
+            }
         }
 
         // ---------------- ROM routes (existing) ----------------
