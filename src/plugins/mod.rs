@@ -36,7 +36,40 @@ pub fn scan(cfg: &Config) -> Vec<Game> {
             log::error!("provider {} panicked during scan; skipping", p.id());
         }
     }
-    games
+    dedupe_candidates(games)
+}
+
+/// Remove entries that would launch the very same program twice.
+///
+/// Providers are registered curated-first, so the curated tile wins and a
+/// desktop entry for the same binary is dropped. Without this, a program that
+/// ships two `.desktop` files (Brave ships `brave-browser.desktop` and
+/// `com.brave.Browser.desktop`) shows up twice under two different names.
+pub fn dedupe_candidates(games: Vec<Game>) -> Vec<Game> {
+    use crate::games::Launch;
+    use std::collections::HashSet;
+
+    let mut seen_programs: HashSet<String> = HashSet::new();
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut out = Vec::with_capacity(games.len());
+    for g in games {
+        if !seen_ids.insert(g.id.clone()) {
+            continue;
+        }
+        if let Launch::Program { program, .. } = &g.launch {
+            // Resolve symlinks so /usr/bin/x and /bin/x collapse to one key;
+            // fall back to the raw path when the target is not readable.
+            let key = std::fs::canonicalize(program)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| program.clone());
+            if !key.is_empty() && !seen_programs.insert(key) {
+                log::debug!("dropping duplicate entry {} ({})", g.id, program);
+                continue;
+            }
+        }
+        out.push(g);
+    }
+    out
 }
 
 /// Which config field gates a provider id (None = always enabled).
@@ -63,5 +96,66 @@ mod tests {
         assert_eq!(toggled_on(&cfg, "heroic"), Some(true));
         assert_eq!(toggled_on(&cfg, "desktop"), Some(false));
         assert_eq!(toggled_on(&cfg, "future-provider"), None);
+    }
+
+    fn prog(id: &str, program: &str) -> Game {
+        Game {
+            id: id.into(),
+            title: id.into(),
+            source: "test".into(),
+            launch: crate::games::Launch::Program {
+                program: program.into(),
+                args: vec![],
+            },
+            icon: None,
+            artwork: None,
+            last_played: None,
+            playtime_secs: 0,
+            favorite: false,
+            installed: true,
+            platform: None,
+            rom_exts: vec![],
+            rom_dir: None,
+        }
+    }
+
+    #[test]
+    fn duplicate_programs_collapse_to_the_first_entry() {
+        // Brave ships two desktop files for one binary; only one tile may show.
+        let out = dedupe_candidates(vec![
+            prog("app-brave", "/usr/bin/brave-browser"),
+            prog("desktop-brave-browser.desktop", "/usr/bin/brave-browser"),
+            prog("desktop-com.brave.Browser.desktop", "/usr/bin/brave-browser"),
+            prog("app-chromium", "/usr/bin/chromium"),
+        ]);
+        let ids: Vec<&str> = out.iter().map(|g| g.id.as_str()).collect();
+        assert_eq!(ids, vec!["app-brave", "app-chromium"]);
+    }
+
+    #[test]
+    fn dedupe_keeps_distinct_programs_and_non_program_launches() {
+        let mut steam = prog("steam-570", "steam");
+        steam.launch = crate::games::Launch::Steam { app_id: "570".into() };
+        let mut same_steam = prog("heroic-dota", "steam");
+        same_steam.launch = crate::games::Launch::Steam { app_id: "570".into() };
+        let out = dedupe_candidates(vec![
+            prog("a", "/usr/bin/one"),
+            prog("b", "/usr/bin/two"),
+            steam,
+            same_steam,
+        ]);
+        // Steam/heroic entries are keyed by app id, not program path, so they
+        // are left alone: they are different launchers for the same game.
+        assert_eq!(out.len(), 4);
+    }
+
+    #[test]
+    fn duplicate_ids_collapse_regardless_of_launch_kind() {
+        let mut a = prog("same", "/usr/bin/one");
+        a.launch = crate::games::Launch::Steam { app_id: "1".into() };
+        let mut b = prog("same", "/usr/bin/two");
+        b.title = "second".into();
+        let out = dedupe_candidates(vec![a, b]);
+        assert_eq!(out.len(), 1);
     }
 }
