@@ -72,10 +72,8 @@
     align-items: center;
     gap: 1.4rem;
     padding: 0 1.6rem;
-    background: linear-gradient(180deg, rgba(10,13,21,0.9), rgba(10,13,21,0.55));
+    background: linear-gradient(180deg, rgba(10,13,21,0.97), rgba(10,13,21,0.92));
     border-bottom: 1px solid var(--line);
-    backdrop-filter: blur(18px);
-    -webkit-backdrop-filter: blur(18px);
     position: relative;
     z-index: 30;
   }
@@ -229,9 +227,10 @@
   #hero-card .glow {
     position: absolute; inset: -30% -20%;
     background: radial-gradient(40% 60% at 30% 20%, rgba(var(--accent-rgb),0.55), transparent 70%);
-    animation: drift 9s ease-in-out infinite alternate;
+    /* Static: an infinite animation repaints the whole page every frame,
+       which is very slow on the software (llvmpipe) renderer. */
   }
-  body.no-anim #hero-card .glow { animation: none; }
+  body.anim #hero-card .glow { animation: drift 9s ease-in-out infinite alternate; }
   @keyframes drift { from { transform: translate(0,0) rotate(0deg);} to { transform: translate(4%, -6%) rotate(4deg);} }
   #hero-card .content { position: relative; }
   #hero-card .eyebrow { font-size: 0.72rem; letter-spacing: 0.22em; text-transform: uppercase; color: var(--text-dim); }
@@ -327,12 +326,58 @@
   .row.slider-active { box-shadow: 0 0 0 2px var(--accent); background: rgba(var(--accent-rgb),0.08); border-radius: 0.6rem; }
   .pct { min-width: 3rem; text-align: right; font-family: var(--mono); font-size: 0.85rem; }
 
+  /* ------------------------------ Monogram ---------------------------- */
+  .cover .mono {
+    width: 100%; height: 100%;
+    display: grid; place-items: center;
+    font-weight: 900; font-size: 2.4rem; letter-spacing: 0.02em;
+    color: #fff;
+    background: linear-gradient(140deg,
+      hsl(var(--h) 62% 42%),
+      hsl(calc(var(--h) + 40) 58% 26%));
+    text-shadow: 0 2px 10px rgba(0,0,0,0.45);
+  }
+
+  /* ------------------------------ Taskbar ----------------------------- */
+  #taskbar {
+    flex: 0 0 auto;
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.4rem 1rem;
+    background: rgba(8,10,17,0.96);
+    border-top: 1px solid var(--line);
+    min-height: 2.9rem;
+    overflow-x: auto;
+  }
+  #taskbar .tb-label {
+    font-size: 0.68rem; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--text-faint); margin-right: 0.3rem; white-space: nowrap;
+  }
+  .tb-item {
+    display: flex; align-items: center; gap: 0.5rem;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 0.7rem; padding: 0.35rem 0.6rem 0.35rem 0.45rem;
+    cursor: pointer; color: var(--text); font-size: 0.82rem; font-weight: 600;
+    white-space: nowrap; max-width: 15rem;
+  }
+  .tb-item:hover, .tb-item.focused { border-color: var(--accent); }
+  .tb-item .dot {
+    width: 1.5rem; height: 1.5rem; border-radius: 0.45rem; flex: 0 0 auto;
+    display: grid; place-items: center; font-size: 0.7rem; font-weight: 800;
+    background: linear-gradient(140deg, var(--accent), var(--accent2)); color: #fff;
+  }
+  .tb-item .nm { overflow: hidden; text-overflow: ellipsis; }
+  .tb-item .x {
+    border: 0; background: transparent; color: var(--text-faint);
+    font-size: 1rem; line-height: 1; cursor: pointer; padding: 0 0.2rem;
+  }
+  .tb-item .x:hover { color: var(--danger); }
+  #taskbar .tb-empty { color: var(--text-faint); font-size: 0.8rem; }
+
   /* ------------------------------ Overlays --------------------------- */
   .overlay {
     position: absolute; inset: 0; z-index: 60;
     display: flex; align-items: center; justify-content: center;
-    background: rgba(4,6,10,0.55); backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
+    background: rgba(4,6,10,0.82);
     opacity: 0; pointer-events: none; transition: opacity .2s;
   }
   .overlay.open { opacity: 1; pointer-events: auto; }
@@ -413,6 +458,8 @@
   #playing .hint kbd { color: var(--text); }
 
   /* ------------------------------ Toasts ----------------------------- */
+  .playing-actions { display: flex; gap: 0.8rem; margin-top: 1.2rem; justify-content: center; }
+
   #toasts { position: absolute; top: 1.2rem; left: 50%; transform: translateX(-50%); z-index: 100; display: flex; flex-direction: column; gap: 0.6rem; align-items: center; pointer-events: none; }
   .toast {
     background: var(--panel-solid); border: 1px solid var(--line-strong);
@@ -561,7 +608,16 @@
   <div id="playing">
     <div class="ring"><div class="novamark">N</div></div>
     <h2 id="playing-title">Booting…</h2>
-    <p class="hint">Game is running &mdash; press <kbd>L2</kbd> + <kbd>R2</kbd> then <b>Return to desktop</b> to come back</p>
+    <p class="hint" id="playing-hint">Running — its window is open over NovaShell</p>
+    <div class="playing-actions">
+      <button class="btn ghost" data-action="playing-dismiss" data-x="0" data-y="0">Back to NovaShell</button>
+      <button class="btn danger" data-action="playing-quit" data-x="1" data-y="0">Quit game</button>
+    </div>
+  </div>
+
+  <div id="taskbar">
+    <span class="tb-label">Open</span>
+    <span id="tb-items"></span>
   </div>
 
   <div id="toasts"></div>
@@ -655,12 +711,14 @@ function handleEvent(msg) {
     case "game_start":
       state.playing = msg.title || "A game";
       showPlaying(true);
+      setTimeout(renderTaskbar, 500);
       break;
     case "game_exit":
       showPlaying(false);
       if (state.playing) toast("Closed " + state.playing, "ok");
       state.playing = null;
       refreshLibrary(true, false);
+      setTimeout(renderTaskbar, 500);
       break;
     case "controller":
       handleController(msg);
@@ -794,6 +852,19 @@ function runAction(action, el) {
       break;
     case "go-home":
       goHome();
+      break;
+    case "win-focus":
+      post("windows:focus", { pid: Number(el.dataset.pid) || 0 });
+      break;
+    case "win-close":
+      post("windows:close", { pid: Number(el.dataset.pid) || 0 });
+      setTimeout(renderTaskbar, 300);
+      break;
+    case "playing-dismiss":
+      showPlaying(false);
+      break;
+    case "playing-quit":
+      quitRunningApp();
       break;
     case "filter":
       state.filter = el.dataset.filter;
@@ -1373,7 +1444,7 @@ function gameCard(g, x, y) {
     ? '<div class="cover"><img alt="" src="file://' + g.artwork + '"></div>'
     : (g.icon
       ? '<div class="cover" style="background:linear-gradient(135deg,#232a44,#141827)"><img alt="" src="file://' + g.icon + '"></div>'
-      : '<div class="cover"><div class="ph">' + "◈" + "</div></div>");
+      : '<div class="cover">' + monogram(g.title) + "</div>");
   const subtitle = !g.installed
     ? "Not installed"
     : (g.source === "emulator"
@@ -1390,6 +1461,20 @@ function gameCard(g, x, y) {
 }
 
 function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+// Apps with no installed icon theme get a coloured monogram instead of a
+// blank tile, so every entry still reads as an app.
+function monogram(title) {
+  const t = String(title || "?");
+  const words = t.trim().split(/[\s/._-]+/).filter(Boolean);
+  let text = words.length >= 2
+    ? (words[0][0] || "") + (words[1][0] || "")
+    : (words[0] || "?").slice(0, 2);
+  text = text.toUpperCase();
+  let h = 0;
+  for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) >>> 0;
+  return '<div class="mono" style="--h:' + (h % 360) + '">' + esc(text) + "</div>";
+}
 
 /* ------------------------------ Home render -------------------------- */
 function renderHome() {
@@ -1582,8 +1667,19 @@ function showPlaying(open) {
 }
 
 /* ----------------------------- Screenshot ----------------------------- */
-function captureScreenshot() {
-  post("system:screenshot", { mode: (state.config || {}).screenshot_mode || "auto" }).then((r) => {
+// Close the app the shell launched (its whole process group), then return.
+function quitRunningApp() {
+  post("windows:list").then((r) => {
+    const app = ((r && r.windows) || []).find((w) => w.kind === "app");
+    if (!app) { toast("Nothing is running", "warn"); showPlaying(false); return; }
+    post("windows:close", { pid: app.pid });
+    showPlaying(false);
+    toast("Closed " + app.title);
+    setTimeout(renderTaskbar, 400);
+  });
+}
+
+function captureScreenshot() {  post("system:screenshot", { mode: (state.config || {}).screenshot_mode || "auto" }).then((r) => {
     if (r && r.ok && r.path) toast("Screenshot saved", "ok");
     else toast(r && r.error ? r.error : "Screenshot failed (install grim)", "warn");
     if (r && r.ok && r.path) playClick();
@@ -1612,6 +1708,33 @@ function renderAll() {
   renderHome();
   renderLibrary(false);
   renderSettings();
+  renderTaskbar();
+}
+
+/* ------------------------------ Taskbar ------------------------------- */
+// Every app the shell opened is its own window under WSLg, so the taskbar is
+// how the user jumps back to one (or closes it) without hunting taskbar icons.
+function renderTaskbar() {
+  const box = $("#tb-items");
+  if (!box) return;
+  post("windows:list").then((r) => {
+    if (!r || !r.windows) return;
+    if (!r.windows.length) { box.innerHTML = '<span class="tb-empty">nothing open</span>'; return; }
+    box.innerHTML = r.windows.map((w) => {
+      const initial = (w.title || "?").trim().charAt(0).toUpperCase();
+      const close = w.kind === "shell" ? "" :
+        '<button class="x" data-action="win-close" data-pid="' + w.pid + '" title="Close">×</button>';
+      return '<div class="tb-item" data-action="win-focus" data-pid="' + w.pid + '" data-x="-1" data-y="-1">' +
+        '<span class="dot">' + esc(initial) + "</span>" +
+        '<span class="nm">' + esc(w.title) + "</span>" + close + "</div>";
+    }).join("");
+  });
+}
+let taskbarTimer = null;
+function startTaskbar() {
+  if (taskbarTimer) return;
+  taskbarTimer = setInterval(renderTaskbar, 2000);
+  renderTaskbar();
 }
 
 /* ------------------------------ Boot --------------------------------- */
@@ -1626,6 +1749,7 @@ async function boot() {
   const idn = r.identity || {};
   $("#home-greeting").textContent = "Welcome back, " + (idn.user || "gamer");
   renderAll();
+  startTaskbar();
   setTimeout(() => {
     const home = $(".screen[data-screen=home]");
     indexFocus(home);

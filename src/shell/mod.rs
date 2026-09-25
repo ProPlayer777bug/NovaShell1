@@ -310,8 +310,18 @@ struct AppState {
     controllers: Arc<Mutex<Vec<ControllerInfo>>>,
     sender: mpsc::Sender<String>,
     running: Rc<RefCell<Option<RunningSession>>>,
+    /// Helper windows opened by the shell (file manager, chooser) shown in the
+    /// taskbar so the user can switch back to them or close them.
+    helpers: Rc<RefCell<Vec<HelperWindow>>>,
     main_loop: glib::MainLoop,
     opts: RunOptions,
+}
+
+/// A helper window the shell opened on the user's behalf.
+#[derive(Clone)]
+struct HelperWindow {
+    pid: u32,
+    title: String,
 }
 
 /// Window size for windowed mode. Clamped to the monitor minus frame headroom
@@ -601,6 +611,7 @@ window.present();
         controllers,
         sender,
         running: Rc::new(RefCell::new(None)),
+        helpers: Rc::new(RefCell::new(Vec::new())),
         main_loop: main_loop.clone(),
         opts: opts.clone(),
     });
@@ -716,6 +727,81 @@ fn route(state: &AppState, msg: Value) {
             }
         }
 
+        // Taskbar contents: the shell plus anything it has open. WSLg gives
+        // every app its own window, so the taskbar is how the user switches
+        // between them.
+        "windows:list" => {
+            let mut items: Vec<Value> = vec![json!({
+                "id": "shell",
+                "title": "NovaShell",
+                "kind": "shell",
+                "pid": 0,
+                "active": true,
+            })];
+            if let Some(r) = state.running.borrow().as_ref() {
+                items.push(json!({
+                    "id": format!("app-{}", r.pid),
+                    "title": r.title,
+                    "kind": "app",
+                    "pid": r.pid,
+                    "active": false,
+                }));
+            }
+            for h in state.helpers.borrow().iter() {
+                items.push(json!({
+                    "id": format!("helper-{}", h.pid),
+                    "title": h.title,
+                    "kind": "helper",
+                    "pid": h.pid,
+                    "active": false,
+                }));
+            }
+            reply(state, id, json!({ "ok": true, "windows": items }));
+        }
+
+        // Raise/focus an open window. Under WSLg the compositor owns focus, so
+        // this is best effort — clicking the taskbar item should still bring
+        // the window forward on compositors that honour _NET_ACTIVE_WINDOW.
+        "windows:focus" => {
+            let pid = msg["pid"].as_i64().unwrap_or(0);
+            if pid > 0 {
+                let _ = std::process::Command::new("xdotool")
+                    .args([
+                        "search",
+                        "--pid",
+                        &pid.to_string(),
+                        "windowactivate",
+                        "--sync",
+                    ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            } else {
+                show_shell(state);
+            }
+            reply(state, id, json!({ "ok": true }));
+        }
+
+        // Close something the shell opened (app or helper window).
+        "windows:close" => {
+            let pid = msg["pid"].as_i64().unwrap_or(0);
+            if pid > 0 {
+                state.helpers.borrow_mut().retain(|h| h.pid as i64 != pid);
+                let _ = std::process::Command::new("kill")
+                    .arg(format!("-{pid}"))
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                if let Some(r) = state.running.borrow().as_ref() {
+                    if r.pid as i64 == pid {
+                        state.running.borrow_mut().take();
+                    }
+                }
+                show_shell(state);
+            }
+            reply(state, id, json!({ "ok": true }));
+        }
+
         // Native file chooser for a game file — the same dialog a browser
         // shows for "upload file". The chosen path comes back to the UI as
         // `_rom_chosen`, which then boots the emulator with it.
@@ -769,14 +855,18 @@ fn route(state: &AppState, msg: Value) {
                             log::info!("roms:pick opening Files ({program}) on {}", dir.display());
                             let spec = Spec::new("Files", program)
                                 .arg(dir.to_string_lossy().to_string());
-                            if let Err(e) = spawn_background(&spec) {
-                                log::error!("roms:pick could not start Files: {e}");
+                            match spawn_background(&spec) {
+                                Ok(pid) => state
+                                    .helpers
+                                    .borrow_mut()
+                                    .push(HelperWindow { pid, title: "Files".into() }),
+                                Err(e) => log::error!("roms:pick could not start Files: {e}"),
                             }
                         }
                         None => log::error!("roms:pick: no file manager installed"),
                     }
-                    // Give the shell window away so the file manager is on top.
-                    state.window.set_visible(false);
+                    // The shell stays open: Files opens as a window on top of
+                    // it, like any other app, and the taskbar can switch back.
                     let sender = state.sender.clone();
                     let exts = g.rom_exts.clone();
                     std::thread::Builder::new()
@@ -920,7 +1010,10 @@ fn route(state: &AppState, msg: Value) {
                 .unwrap_or_else(|| "nautilus".to_string());
             let spec = Spec::new("Files", program).arg(dir.to_string_lossy().to_string());
             match spawn_background(&spec) {
-                Ok(()) => reply(state, id, json!({ "ok": true })),
+                Ok(pid) => {
+                    state.helpers.borrow_mut().push(HelperWindow { pid, title: "Files".into() });
+                    reply(state, id, json!({ "ok": true, "pid": pid }));
+                }
                 Err(e) => reply(state, id, json!({ "ok": false, "error": e.to_string() })),
             }
         }
@@ -1613,9 +1706,10 @@ fn rom_watch_store() -> &'static std::sync::Mutex<
 /// Launch a helper app (e.g. the file manager) *beside* the shell: the shell
 /// window stays visible, no "now playing" state, and quitting the shell does
 /// not take the helper down (it is the user's own file manager window).
-fn spawn_background(spec: &Spec) -> Result<()> {
+fn spawn_background(spec: &Spec) -> Result<u32> {
     log::info!("opening helper: {} ({})", spec.name, spec.program);
     let mut child = crate::launcher::spawn(spec)?;
+    let pid = child.id();
     // A freshly mapped window can land behind the shell under WSLg, which
     // looks like "nothing opened". Raise it once it is on screen.
     let program = std::path::Path::new(&spec.program)
@@ -1631,7 +1725,7 @@ fn spawn_background(spec: &Spec) -> Result<()> {
             .status();
         let _ = child.wait();
     });
-    Ok(())
+    Ok(pid)
 }
 
 fn launch_spec(state: &AppState, spec: &Spec, library_id: Option<&str>) -> Result<()> {
@@ -1650,10 +1744,10 @@ fn launch_spec(state: &AppState, spec: &Spec, library_id: Option<&str>) -> Resul
     send_event(state, json!({ "event": "game_start", "title": title }));
 
     let sender = state.sender.clone();
-    // Always hide the shell window while something else runs, regardless of
-    // windowed/fullscreen, so the launched app takes the screen on its own
-    // instead of sitting next to a second NovaShell window.
-    let hide_mode = true;
+    // Do NOT hide the shell: launched apps open as normal windows on top of
+    // NovaShell (the way Chrome opens over a desktop), and the taskbar in the
+    // shell is used to switch between them or close them.
+    let hide_mode = false;
 
     // Wait for the child. If it dies within the first ~1.4s (e.g. a Qt app
     // that cannot find its backend), tell the UI it failed so the shell comes
