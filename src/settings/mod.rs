@@ -30,6 +30,7 @@ pub const DEFAULT_CONTROLLER_MAP: &[(&str, &str)] = &[
 ];
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
 pub struct ControllerConfig {
     /// Master controller input toggle.
     pub enabled: bool,
@@ -53,6 +54,7 @@ impl Default for ControllerConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
 pub struct LauncherConfig {
     pub steam_enabled: bool,
     pub heroic_enabled: bool,
@@ -80,6 +82,9 @@ impl Default for LauncherConfig {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
+    /// Schema version. Defaults to 1 so a hand-written or partial config file
+    /// still loads instead of being thrown away wholesale.
+    #[serde(default = "default_version")]
     pub version: u32,
     /// UI theme id (currently "nova").
     #[serde(default = "default_theme")]
@@ -116,6 +121,7 @@ pub struct Config {
 }
 
 fn default_theme() -> String { "nova".into() }
+fn default_version() -> u32 { 1 }
 fn default_accent() -> String { "#7c3aed".into() }
 fn default_ui_scale() -> f64 { 1.0 }
 fn default_bool_true() -> bool { true }
@@ -167,7 +173,9 @@ impl Config {
     pub fn save(&self) -> Result<()> {
         util::ensure_dir(&util::config_dir())?;
         let p = Self::path();
-        let tmp = p.with_extension("json.tmp");
+        // Unique temp name per writer, so two concurrent saves cannot
+        // interleave and leave a truncated config behind.
+        let tmp = p.with_extension(format!("json.tmp-{}", std::process::id()));
         let json = serde_json::to_string_pretty(self).context("serializing config")?;
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, &p)?;

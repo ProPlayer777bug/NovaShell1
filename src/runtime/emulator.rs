@@ -15,11 +15,13 @@ use crate::runtime::{Capability, Check, LaunchTarget, Runtime, RuntimeInfo, Runt
 /// One console (PS2, PS3, …) as a runtime.
 pub struct EmulatorRuntime {
     def: &'static EmulatorDef,
+    /// Test/injection hook: forces a specific binary instead of searching PATH.
+    pub bin_override: Option<std::path::PathBuf>,
 }
 
 impl EmulatorRuntime {
     pub fn new(def: &'static EmulatorDef) -> Self {
-        EmulatorRuntime { def }
+        EmulatorRuntime { def, bin_override: None }
     }
 
     /// Stable id, matching the library tile id shape (`emulator-pcsx2-qt`).
@@ -36,6 +38,9 @@ impl EmulatorRuntime {
     }
 
     fn resolved_bin(&self) -> Option<String> {
+        if let Some(p) = &self.bin_override {
+            return Some(p.to_string_lossy().to_string());
+        }
         self.def
             .bins
             .iter()
@@ -153,5 +158,26 @@ mod tests {
         // Either the emulator is not installed, or the ROM is missing: both
         // are errors, never a silent launch.
         assert!(rt.build_spec(&t).is_err());
+    }
+
+    /// The ROM is the first argument and must survive caller arguments.
+    #[test]
+    fn build_spec_keeps_the_rom_before_caller_args() {
+        let dir = std::env::temp_dir().join(format!("nova-emospec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rom = dir.join("game.iso");
+        std::fs::write(&rom, b"x").unwrap();
+
+        let mut rt = ps2();
+        // Pretend the emulator binary exists so only argument order can fail.
+        rt.bin_override = Some(std::path::PathBuf::from("/usr/games/pcsx2-qt"));
+        let mut t = LaunchTarget::new("Game", "Game").with_executable(&rom);
+        t.args = vec!["--fullscreen".to_string()];
+        let spec = rt.build_spec(&t).expect("spec");
+        assert_eq!(spec.program, "/usr/games/pcsx2-qt");
+        assert_eq!(spec.args[0], rom.to_string_lossy().to_string());
+        assert_eq!(spec.args[1], "--fullscreen");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

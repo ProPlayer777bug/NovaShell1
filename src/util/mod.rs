@@ -3,6 +3,22 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// A single lock guarding every test that redirects the data/config
+/// directories through environment variables.
+///
+/// Those variables are process-global, so two test modules setting them at the
+/// same time made one test read (or write) the other's temporary directory and
+/// fail in a way that looked unrelated. Hold this for the whole test.
+#[cfg(test)]
+pub fn test_dir_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    // A poisoned lock only means another test panicked; waiting is still correct.
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 pub fn config_dir() -> PathBuf {
     if let Ok(dir) = env::var("NOVASHELL_CONFIG_DIR") {
         if !dir.is_empty() {

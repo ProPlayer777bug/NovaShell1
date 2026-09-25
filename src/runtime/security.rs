@@ -122,13 +122,20 @@ pub fn ensure_not_root() -> anyhow::Result<()> {
 }
 
 /// Effective uid, read from `/proc/self/status` (avoids a libc dependency).
+///
+/// `/proc/self/status` lists `Uid: real effective saved filesystem`, so the
+/// *second* field is the effective uid. Reading the first (real) uid let a
+/// setuid process with a non-zero real uid and effective uid 0 pass the check.
 fn effective_uid() -> u32 {
     std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|s| {
             s.lines()
                 .find(|l| l.starts_with("Uid:"))
-                .and_then(|l| l.split_whitespace().nth(1).map(|v| v.to_string()))
+                // "Uid:\t<real>\t<effective>\t<saved>\t<fs>" — index 1 is the
+                // *real* uid. Reading it let a setuid process with real uid
+                // 1000 but effective uid 0 pass the root check.
+                .and_then(|l| l.split_whitespace().nth(2).map(|v| v.to_string()))
         })
         .and_then(|v| v.parse().ok())
         .unwrap_or(u32::MAX)

@@ -5,7 +5,7 @@ An original, controller-first, console-style desktop shell for **Ubuntu**. NovaS
 - **Original design.** No console-brand assets or trademarks; the UI, icons, sounds and layout are all NovaShell's own. Visual language: dark, glassy panels, an accent glow you can re-color, rem-based scaling for 1080p → 4K.
 - **Controller-first.** Navigate everything with a gamepad (d-pad + stick, `A` confirm, `B` back, `L1/R1` tabs, `L2/R2` quick menu, `Share` screenshot). Keyboard and mouse work too.
 - **One window, one process.** GTK4 + WebKitGTK6 window with a single self-contained HTML/CSS/JS UI (offline, no CDNs), driven by a Rust core.
-- **Non-destructive.** NovaShell never touches GRUB, kernel parameters, system services or GNOME's configuration. GNOME stays installed as the fallback desktop, and *Return to desktop* simply exits NovaShell back to your session.
+- **Non-destructive by default.** NovaShell never touches GRUB, kernel parameters or GNOME's configuration. GNOME stays installed as the fallback desktop, and *Return to desktop* simply exits NovaShell back to your session. Running the app from the desktop installs nothing; the optional `scripts/install.sh` and `scripts/install-service.sh` do install a systemd unit and/or an autostart entry, and `scripts/uninstall.sh` removes them again.
 - **Extensible.** Launchers are providers (Steam, Heroic, desktop entries). Add your own by implementing one trait.
 
 ![icon](assets/org.novashell.svg)

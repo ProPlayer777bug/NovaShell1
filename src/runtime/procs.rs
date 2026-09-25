@@ -113,20 +113,44 @@ impl ProcessManager {
             anyhow::bail!("refusing to signal pid 0");
         }
         // Only signal pids we actually track, so a bad request can never hit an
-        // unrelated process.
+        // unrelated process. A pid the OS has since recycled is also refused
+        // rather than being used to kill somebody else's process.
         if self.get(pid).is_none() {
             anyhow::bail!("not a tracked process: {pid}");
         }
-        self.update_state(pid, ProcessState::Stopping);
+        if !crate::runtime::procs::process_alive(pid) {
+            self.finish(pid, 0);
+            anyhow::bail!("that process has already exited");
+        }
+        // `kill -TERM100` signals process 100; a process *group* needs the
+        // leading dash: `kill -TERM -100`. The old form left wineserver, Proton
+        // helpers and emulator children running after "Force".
         let status = std::process::Command::new("kill")
-            .arg(format!("{signal}{pid}"))
+            .args([signal, &format!("-{pid}")])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()?;
         if !status.success() {
-            anyhow::bail!("could not signal process {pid}");
+            anyhow::bail!("could not signal process group {pid}");
         }
+        self.update_state(pid, ProcessState::Stopping);
         Ok(())
+    }
+}
+
+/// Is this pid still running?
+pub fn process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        true
     }
 }
 
@@ -178,6 +202,28 @@ mod tests {
         let pm = ProcessManager::new();
         assert!(pm.stop(999_999).is_err());
         assert!(pm.kill(0).is_err());
+    }
+
+    /// Only meaningful where a liveness probe exists: on other platforms
+    /// `process_alive` assumes a pid is running, so the guard cannot trigger.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refuses_to_signal_a_process_that_has_already_exited() {
+        // A tracked pid that is gone must not be signalled: the OS may have
+        // recycled it for an unrelated process.
+        let pm = ProcessManager::new();
+        pm.insert(info(999_998));
+        let err = pm.stop(999_998).unwrap_err().to_string();
+        assert!(err.contains("already exited"), "unexpected error: {err}");
+        // ...and the stale record is dropped.
+        assert!(pm.get(999_998).is_none());
+    }
+
+    #[test]
+    fn liveness_probe_rejects_pid_zero() {
+        assert!(!process_alive(0));
+        // The shell's own pid is definitely running.
+        assert!(process_alive(std::process::id()));
     }
 
     #[test]

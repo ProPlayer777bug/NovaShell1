@@ -1,14 +1,45 @@
 # Nova Runtime Manager — Architecture & Design
 
-Status: Phase 2 (design). Implementation follows in `src/runtime/`.
+Status: **implemented** (`src/runtime/`) and wired into the shell bridge and the
+Runtime Manager screen. Phases 1–10 are complete; this document records the
+design and the commands the UI actually uses.
 
 ## 1. Goal
 
-One place that knows how to *run* things. Today the shell launches a program in
-five different places (`Launch::to_spec`, `console_polish`, `play_game_file`,
-`roms:*` routes, the apt installer). The Runtime Manager becomes the single
-source of truth for turning a library entry into a spawned process, and grows to
-cover Wine, Proton and future runtimes without touching the UI or the library.
+One place that knows how to *run* things. The shell launches a program in
+several places (`Launch::to_spec`, `console_polish`, `play_game_file`,
+`roms:*` routes, the apt installer). The Runtime Manager is the single
+source of truth for turning a library entry into a spawned process, and covers
+Wine, Proton and PS3 packages without the UI or the library knowing about them.
+
+## 1a. What the user sees
+
+- **Runtimes tab**: detected runtimes and their status, per-app Wine/Proton
+  prefixes with Repair/Delete, live sessions with Stop/Force, per-runtime logs,
+  Windows files and PS3 packages waiting for confirmation, and a preflight that
+  explains *why* a PS3 package cannot be installed (missing firmware/licence).
+- **Taskbar**: the shell plus every app, emulator, Wine/Proton session and
+  helper window the shell opened, with focus and close per entry. Entries are
+  reconciled against `/proc`, so a closed app disappears on its own.
+
+## 1b. Bridge commands
+
+| Command | Purpose |
+|---|---|
+| `runtimes:list` / `runtimes:detect` | runtime inventory (`detect` also emits `runtime.detected`) |
+| `runtimes:validate` | pre-flight checks for one runtime + target |
+| `prefixes:list` / `:create` / `:delete` / `:repair` | per-app prefix management |
+| `procs:list` / `:stop` / `:kill` | session control (signals the process **group**) |
+| `windows:list` / `:focus` / `:close` | taskbar contents and window control |
+| `windows:apps` / `:inspect` / `:app:add` / `:app:remove` / `:launch` / `:install` | Windows app catalogue and Wine/Proton launches |
+| `windows:pending` / `:decide` / `:associations` | confirmation-gated `.exe` handling |
+| `ps3:installables` / `:pending` / `:install` / `:dismiss` | PS3 packages via RPCS3 |
+| `runtime:logs` | per-app launch log tail |
+
+Events emitted to the UI: `runtime.detected`, `prefix.created`, `prefix.deleted`,
+`application.started`, `application.exited`, `application.installation.*`,
+`windows.file_decided`, `ps3.installed`, `ps3.install_failed`, `game_start`,
+`game_exit`, `library_changed`.
 
 ## 2. Existing architecture this plugs into (from the Phase 1 audit)
 
@@ -29,11 +60,13 @@ src/runtime/
   mod.rs        Runtime trait, RuntimeKind, RuntimeInfo, registry, selection
   native.rs     NativeRuntime  — wraps Launch::Program
   emulator.rs   EmulatorRuntime— wraps apps::EMULATORS (PS1/2/3, Wii, …)
-  wine.rs       WineRuntime     — Phase 4
-  proton.rs     ProtonRuntime   — Phase 5
+  wine.rs       WineRuntime     — per-app prefixes, wineboot, ownership checks
+  proton.rs     ProtonRuntime   — multi-build discovery, per-game compat data
   prefixes.rs   PrefixStore     — per-app prefixes, multiple roots
-  procs.rs      ProcessManager  — keyed sessions, stop/kill/restart
-  apps.rs       WindowsApp      — metadata, installer detection
+  procs.rs      ProcessManager  — keyed sessions, group stop/kill, liveness
+  apps.rs       WindowsApp      — metadata, installer detection, file handlers
+  decisions.rs  per-file choices for .exe/.ps3 handling
+  ps3.rs        RPCS3 packages  — discovery, install, licence placement
   security.rs   validation      — paths, ids, env, root refusal
   logs.rs       per-app structured logs
 ```

@@ -56,12 +56,15 @@ pub fn dedupe_candidates(games: Vec<Game>) -> Vec<Game> {
         if !seen_ids.insert(g.id.clone()) {
             continue;
         }
-        if let Launch::Program { program, .. } = &g.launch {
-            // Resolve symlinks so /usr/bin/x and /bin/x collapse to one key;
-            // fall back to the raw path when the target is not readable.
+        if let Launch::Program { program, args } = &g.launch {
+            // The key includes the arguments: "same executable" is not the same
+            // launch. `chromium --profile-directory=Work` and
+            // `chromium --profile-directory=Gaming` are different apps, and
+            // collapsing them deleted a real entry.
             let key = std::fs::canonicalize(program)
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| program.clone());
+            let key = format!("{key}\u{1}{}", args.join("\u{1}"));
             if !key.is_empty() && !seen_programs.insert(key) {
                 log::debug!("dropping duplicate entry {} ({})", g.id, program);
                 continue;
@@ -147,6 +150,21 @@ mod tests {
         // Steam/heroic entries are keyed by app id, not program path, so they
         // are left alone: they are different launchers for the same game.
         assert_eq!(out.len(), 4);
+    }
+
+    #[test]
+    fn same_executable_with_different_args_is_not_a_duplicate() {
+        // Two Chromium profiles are two different things to launch.
+        let mut work = prog("desktop-chrome-work", "/usr/bin/chromium");
+        if let crate::games::Launch::Program { args, .. } = &mut work.launch {
+            *args = vec!["--profile-directory=Work".into()];
+        }
+        let mut gaming = prog("desktop-chrome-gaming", "/usr/bin/chromium");
+        if let crate::games::Launch::Program { args, .. } = &mut gaming.launch {
+            *args = vec!["--profile-directory=Gaming".into()];
+        }
+        let out = dedupe_candidates(vec![work, gaming]);
+        assert_eq!(out.len(), 2, "different arguments are different launches");
     }
 
     #[test]

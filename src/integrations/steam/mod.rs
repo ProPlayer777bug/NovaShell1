@@ -274,7 +274,29 @@ pub fn scan_steam_games(cfg: &Config) -> Vec<Game> {
     out
 }
 
-/// Best available `steam` executable (or a flatpak launch string).
+/// Best available Steam command as (program, leading args).
+///
+/// A flatpak install is launched as `flatpak run com.valvesoftware.Steam`, not
+/// as a single program literally named "flatpak run com.valvesoftware.Steam":
+/// the launcher execs programs directly and has no shell, so the old combined
+/// string could never run.
+pub fn steam_command() -> Option<(String, Vec<String>)> {
+    if let Some(bin) = steam_binary() {
+        return Some((bin, Vec::new()));
+    }
+    if std::path::Path::new("/var/lib/flatpak/app/com.valvesoftware.Steam").exists() {
+        return Some((
+            "flatpak".to_string(),
+            vec![
+                "run".to_string(),
+                "com.valvesoftware.Steam".to_string(),
+            ],
+        ));
+    }
+    None
+}
+
+/// Best available `steam` executable.
 pub fn steam_binary() -> Option<String> {
     let cands = [
         "/usr/bin/steam".to_string(),
@@ -304,7 +326,9 @@ pub fn steam_binary() -> Option<String> {
         return Some("steam".to_string());
     }
     if std::path::Path::new("/var/lib/flatpak/app/com.valvesoftware.Steam").exists() {
-        return Some("flatpak run com.valvesoftware.Steam".to_string());
+        // Handled by steam_command(); returning a bare "steam" here would
+        // produce an entry that cannot launch.
+        return Some("steam".to_string());
     }
     None
 }

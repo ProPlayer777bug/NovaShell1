@@ -32,8 +32,18 @@ impl Launch {
         match self {
             Launch::Program { program, args } => Some(Spec::new(name, program).args(args.clone())),
             Launch::Steam { app_id } => {
-                let bin = steam_bin.unwrap_or("steam");
-                Some(Spec::new(name, bin).arg("-applaunch").arg(app_id))
+                // A flatpak Steam is `flatpak run <id> -applaunch <app>`: the
+                // leading arguments must precede the launch flags.
+                let (program, prefix) = match steam_bin {
+                    Some(b) => (b.to_string(), Vec::new()),
+                    None => (
+                        "flatpak".to_string(),
+                        vec!["run".to_string(), "com.valvesoftware.Steam".to_string()],
+                    ),
+                };
+                let mut spec = Spec::new(name, program).args(prefix);
+                spec = spec.arg("-applaunch").arg(app_id);
+                Some(spec)
             }
             Launch::Heroic { app_name } => {
                 // Prefer `legendary` (no GUI dependency) then `heroic`.
@@ -41,8 +51,7 @@ impl Launch {
                     return Some(Spec::new(name, "legendary").arg("launch").arg(app_name));
                 }
                 Some(Spec::new(name, "heroic").arg("-l").arg(app_name))
-            }
-            Launch::None => None,
+            }            Launch::None => None,
         }
     }
 }
@@ -109,21 +118,67 @@ impl Library {
         util::data_dir().join("library.json")
     }
 
+    /// Load the library, quarantining a corrupt file instead of losing it.
+    ///
+    /// Returning an empty library for unparseable JSON was destructive: the
+    /// next save overwrote the only copy, taking favourites, playtime and
+    /// last-played data with it. The damaged file is now kept as
+    /// `library.json.corrupt-<timestamp>` so it can be inspected or restored.
     pub fn load() -> Library {
         let p = Self::path();
         match std::fs::read_to_string(&p) {
-            Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-                log::warn!("Library at {} invalid ({e}); starting fresh.", p.display());
-                Library::default()
-            }),
+            Ok(text) => match serde_json::from_str(&text) {
+                Ok(lib) => lib,
+                Err(e) => {
+                    let backup = p.with_extension(format!(
+                        "json.corrupt-{}",
+                        util::unix_now()
+                    ));
+                    log::error!(
+                        "Library at {} is invalid ({e}); keeping a copy at {}",
+                        p.display(),
+                        backup.display()
+                    );
+                    if let Err(err) = std::fs::write(&backup, &text) {
+                        log::error!("could not preserve the damaged library: {err}");
+                    } else {
+                        // Leave the damaged file in place: overwriting it is
+                        // what destroyed user data before.
+                        log::error!(
+                            "refusing to overwrite the damaged library; move {} out of the way to start fresh",
+                            p.display()
+                        );
+                    }
+                    Library::default()
+                }
+            },
             Err(_) => Library::default(),
         }
     }
 
+    /// True when the on-disk library exists but could not be parsed.
+    pub fn is_corrupt() -> bool {
+        let p = Self::path();
+        match std::fs::read_to_string(&p) {
+            Ok(text) => serde_json::from_str::<Library>(&text).is_err(),
+            Err(_) => false,
+        }
+    }
+
     pub fn save(&self) -> Result<()> {
+        // Never overwrite a file we could not parse: that is how favourites and
+        // playtime were silently destroyed.
+        if Self::is_corrupt() {
+            anyhow::bail!(
+                "the library file at {} is damaged; it was left untouched (a .corrupt copy is kept beside it)",
+                Self::path().display()
+            );
+        }
         util::ensure_dir(&util::data_dir())?;
         let p = Self::path();
-        let tmp = p.with_extension("json.tmp");
+        // A unique temp name: two writers sharing one temp file can interleave
+        // and produce truncated JSON.
+        let tmp = p.with_extension(format!("json.tmp-{}", std::process::id()));
         std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
         std::fs::rename(&tmp, &p)?;
         Ok(())
@@ -137,8 +192,19 @@ impl Library {
                 cand.last_played = existing.last_played.or(cand.last_played);
                 cand.playtime_secs = existing.playtime_secs.max(cand.playtime_secs);
                 cand.favorite = cand.favorite || existing.favorite;
+                // Artwork and icon are user-visible choices; providers usually
+                // know neither, so an empty candidate must not clear them.
                 if cand.icon.is_none() {
                     cand.icon = existing.icon;
+                }
+                if cand.artwork.is_none() {
+                    cand.artwork = existing.artwork;
+                }
+                if cand.rom_dir.is_none() {
+                    cand.rom_dir = existing.rom_dir;
+                }
+                if cand.rom_exts.is_empty() {
+                    cand.rom_exts = existing.rom_exts;
                 }
             }
             self.games.insert(cand.id.clone(), cand);
@@ -280,23 +346,27 @@ pub fn format_last_played(ts: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::{Mutex, OnceLock};
 
     /// Serialises tests that mutate the NOVASHELL_* env vars so parallel
-    /// test threads can't see each other's directories.
+    /// test threads can't see each other's directories. The lock itself is
+    /// shared with every other env-var test (see `util::test_dir_lock`).
     fn iso_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
     struct IsoDirs {
-        _guard: MutexGuard<'static, ()>,
+        _guard: std::sync::MutexGuard<'static, ()>,
         _data: tempfile::TempDir,
         _config: tempfile::TempDir,
     }
 
     fn with_isolated_dirs() -> IsoDirs {
-        let guard = iso_lock().lock().unwrap();
+        // One lock for every test that redirects the data/config directories.
+        // Those env vars are process-global, so a per-module lock let two
+        // modules overwrite each other's directory and fail confusingly.
+        let guard = crate::util::test_dir_lock();
         let data = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
         std::env::set_var("NOVASHELL_DATA_DIR", data.path());

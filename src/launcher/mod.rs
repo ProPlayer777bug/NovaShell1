@@ -31,12 +31,25 @@ impl Spec {
         }
     }
 
+    /// Append one argument.
     pub fn arg(mut self, a: impl Into<String>) -> Self {
         self.args.push(a.into());
         self
     }
 
-    pub fn args(mut self, args: Vec<String>) -> Self {
+    /// Append several arguments, keeping anything already added.
+    ///
+    /// This appends rather than replaces: runtimes build a spec by adding the
+    /// program they need first (`wine <exe>`, `python3 <proton> run <exe>`,
+    /// `pcsx2 <rom>`) and then the caller's arguments, so replacing here would
+    /// silently drop the program argument. Use [`Spec::set_args`] to replace.
+    pub fn args(mut self, args: impl IntoIterator<Item = String>) -> Self {
+        self.args.extend(args);
+        self
+    }
+
+    /// Replace the argument list outright.
+    pub fn set_args(mut self, args: Vec<String>) -> Self {
         self.args = args;
         self
     }
@@ -174,6 +187,14 @@ fn tokenize_exec(exec: &str) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn args_appends_and_set_args_replaces() {
+        let s = Spec::new("t", "prog").arg("first").args(vec!["second".into(), "third".into()]);
+        assert_eq!(s.args, vec!["first", "second", "third"]);
+        let replaced = s.set_args(vec!["only".into()]);
+        assert_eq!(replaced.args, vec!["only"]);
+    }
 
     #[test]
     fn parses_simple_exec() {

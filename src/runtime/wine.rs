@@ -42,6 +42,10 @@ impl WineRuntime {
     }
 
     /// Run `wine --version` with a short timeout so detection never hangs.
+    ///
+    /// The version text is read from the probe's output: returning an empty
+    /// string on success made the Runtime Manager show a blank version for a
+    /// perfectly good install, indistinguishable from a failed probe.
     fn probe_version(exe: &Path) -> Option<String> {
         let out = std::process::Command::new(exe)
             .arg("--version")
@@ -53,16 +57,45 @@ impl WineRuntime {
         // Poll briefly instead of blocking the UI thread.
         let deadline = std::time::Instant::now() + Duration::from_millis(1500);
         loop {
-            if let Ok(Some(status)) = out.try_wait() {
-                return status.success().then_some(String::new());
+            match out.try_wait() {
+                Ok(Some(status)) if status.success() => {
+                    let text = read_pipe(&mut out);
+                    return Some(first_line(&text).unwrap_or_else(|| "unknown".into()));
+                }
+                // The binary ran but failed: not a usable install.
+                Ok(Some(_)) => return None,
+                _ => {}
             }
             if std::time::Instant::now() > deadline {
                 let _ = out.kill();
+                // Reap it: killing without waiting leaves a zombie behind for
+                // every detection pass.
+                let _ = out.wait();
                 return None;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
     }
+}
+
+/// Drain a piped child, returning its combined output.
+fn read_pipe(out: &mut std::process::Child) -> String {
+    use std::io::Read;
+    let mut buf = String::new();
+    if let Some(mut s) = out.stdout.take() {
+        let _ = s.read_to_string(&mut buf);
+    }
+    if let Some(mut s) = out.stderr.take() {
+        let _ = s.read_to_string(&mut buf);
+    }
+    buf
+}
+
+fn first_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|l| l.to_string())
 }
 
 impl Default for WineRuntime {
@@ -293,7 +326,8 @@ fn current_uid() -> u32 {
         .and_then(|s| {
             s.lines()
                 .find(|l| l.starts_with("Uid:"))
-                .and_then(|l| l.split_whitespace().nth(1).map(|v| v.to_string()))
+                // index 1 is the real uid, index 2 the effective one
+                .and_then(|l| l.split_whitespace().nth(2).map(|v| v.to_string()))
         })
         .and_then(|v| v.parse().ok())
         .unwrap_or(u32::MAX)
@@ -330,6 +364,31 @@ mod tests {
         // No Wine installed and no executable: an error, never a bad spec.
         let t = LaunchTarget::new("a", "A");
         assert!(rt.build_spec(&t).is_err());
+    }
+
+    /// The Windows executable is the first argument and must survive when the
+    /// caller also supplies arguments.
+    #[test]
+    fn build_spec_keeps_the_executable_before_caller_args() {
+        let dir = std::env::temp_dir().join(format!("nova-winespec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("game.exe");
+        std::fs::write(&exe, b"x").unwrap();
+
+        let mut rt = WineRuntime::new();
+        rt.executable = Some(std::path::PathBuf::from("/usr/bin/wine"));
+        let mut t = LaunchTarget::new("Game", "Game").with_executable(&exe);
+        t.args = vec!["-windowed".to_string(), "--fullscreen".to_string()];
+        let spec = rt.build_spec(&t).expect("spec");
+        assert_eq!(spec.args.first().map(String::as_str), exe.to_str());
+        assert_eq!(&spec.args[1..], &["-windowed", "--fullscreen"]);
+
+        // With no caller arguments the executable must still be there.
+        let t2 = LaunchTarget::new("Game", "Game").with_executable(&exe);
+        let spec2 = rt.build_spec(&t2).expect("spec");
+        assert_eq!(spec2.args, vec![exe.to_string_lossy().to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

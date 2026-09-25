@@ -83,14 +83,18 @@ pub fn prefix_path(kind: PrefixKind, app_id: &str) -> anyhow::Result<PathBuf> {
 pub fn create_in(root: &Path, kind: PrefixKind, app_id: &str) -> anyhow::Result<PrefixInfo> {
     let path = prefix_path_in(root, kind, app_id)?;
     std::fs::create_dir_all(&path)?;
+    // Re-check after creating: a pre-existing symlink at the prefix path would
+    // otherwise make create_dir_all follow it and populate a directory outside
+    // the configured root (e.g. /etc/drive_c).
+    let safe = security::ensure_within(root, &path)?;
     // A prefix is useless without the Wine-created marker directory, but we do
     // not run `wineboot` here: detection/installation is the runtime's job.
-    let _ = std::fs::create_dir_all(path.join("drive_c"));
+    let _ = std::fs::create_dir_all(safe.join("drive_c"));
     Ok(PrefixInfo {
         id: app_id.to_string(),
         kind,
-        exists: path.is_dir(),
-        path,
+        exists: safe.is_dir(),
+        path: safe,
         size_bytes: None,
         last_used: None,
     })
@@ -125,13 +129,17 @@ pub fn delete(kind: PrefixKind, app_id: &str) -> anyhow::Result<()> {
 /// explicitly confirmed action.
 pub fn repair_in(root: &Path, kind: PrefixKind, app_id: &str) -> anyhow::Result<PrefixInfo> {
     let path = prefix_path_in(root, kind, app_id)?;
-    std::fs::create_dir_all(path.join("drive_c"))?;
-    let _ = std::fs::remove_file(path.join(".update-timestamp"));
+    std::fs::create_dir_all(&path)?;
+    // Same symlink check as create_in: repairing through a symlink would write
+    // outside the prefix root.
+    let safe = security::ensure_within(root, &path)?;
+    std::fs::create_dir_all(safe.join("drive_c"))?;
+    let _ = std::fs::remove_file(safe.join(".update-timestamp"));
     Ok(PrefixInfo {
         id: app_id.to_string(),
         kind,
         exists: true,
-        path,
+        path: safe,
         size_bytes: None,
         last_used: None,
     })
@@ -285,6 +293,39 @@ mod tests {
         let root = TempRoot::new("unknown");
         // Deleting something that was never created is a no-op, not an error.
         assert!(delete_in(root.path(), PrefixKind::Proton, "never-created").is_ok());
+    }
+
+    /// A symlink planted at the prefix path must not let creation or repair
+    /// write outside the configured root.
+    #[cfg(unix)]
+    #[test]
+    fn create_and_repair_refuse_to_follow_a_symlink_out_of_the_root() {
+        let root = TempRoot::new("symlink");
+        let outside = TempRoot::new("symlink-target");
+        let kind_dir = root.path().join(PrefixKind::Wine.dir_name());
+        std::fs::create_dir_all(&kind_dir).unwrap();
+        let link = kind_dir.join("evil");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+
+        let err = create_in(root.path(), PrefixKind::Wine, "evil")
+            .expect_err("create must refuse a symlinked prefix");
+        assert!(
+            err.to_string().to_lowercase().contains("outside")
+                || err.to_string().to_lowercase().contains("within"),
+            "unexpected error: {err}"
+        );
+        let err = repair_in(root.path(), PrefixKind::Wine, "evil")
+            .expect_err("repair must refuse a symlinked prefix");
+        assert!(
+            err.to_string().to_lowercase().contains("outside")
+                || err.to_string().to_lowercase().contains("within"),
+            "unexpected error: {err}"
+        );
+        // Nothing was written into the directory the link pointed at.
+        assert!(
+            !outside.path().join("drive_c").exists(),
+            "a prefix was created outside the root"
+        );
     }
 
     #[test]

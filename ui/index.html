@@ -414,6 +414,10 @@
     white-space: nowrap; max-width: 15rem;
   }
   .tb-item:hover, .tb-item.focused { border-color: var(--accent); }
+  .tb-item .kind {
+    font-size: 0.6rem; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--text-faint); border-left: 1px solid var(--line); padding-left: 0.5rem;
+  }
   .tb-item .dot {
     width: 1.5rem; height: 1.5rem; border-radius: 0.45rem; flex: 0 0 auto;
     display: grid; place-items: center; font-size: 0.7rem; font-weight: 800;
@@ -601,14 +605,14 @@
     <section class="screen" data-screen="library">
       <h2>Library <span class="sub" id="lib-count"></span></h2>
       <div id="filters">
-        <button data-filter="all" class="active">All</button>
-        <button data-filter="favorites">Favorites</button>
-        <button data-filter="steam">Steam</button>
-        <button data-filter="heroic">Heroic</button>
-        <button data-filter="desktop">Native</button>
-        <button data-filter="apps">Apps</button>
-        <button data-filter="emulators">Emulators</button>
-        <button data-filter="manual">Manual</button>
+        <button data-action="filter" data-filter="all" class="active">All</button>
+        <button data-action="filter" data-filter="favorites">Favorites</button>
+        <button data-action="filter" data-filter="steam">Steam</button>
+        <button data-action="filter" data-filter="heroic">Heroic</button>
+        <button data-action="filter" data-filter="desktop">Native</button>
+        <button data-action="filter" data-filter="apps">Apps</button>
+        <button data-action="filter" data-filter="emulators">Emulators</button>
+        <button data-action="filter" data-filter="manual">Manual</button>
       </div>
       <div class="grid wide" id="lib-grid"></div>
       <div id="empty-state" hidden><strong>Nothing here yet</strong>Launch a launcher and press Refresh in Settings.</div>
@@ -732,14 +736,37 @@ function nativeBridge() {
 function post(cmd, data) {
   const id = "m" + (++msgSeq);
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
+    // Every request gets a deadline. Without one, a reply that never arrives
+    // left the promise pending forever: boot() never rendered, and `refreshing`
+    // stayed true so the library could never refresh again.
+    const entry = { resolve, reject, cmd };
+    pending.set(id, entry);
+    entry.timer = setTimeout(() => {
+      if (!pending.has(id)) return;
+      pending.delete(id);
+      reject(new Error("no reply to " + cmd));
+    }, 20000);
     if (nativeBridge()) {
-      nativeBridge().postMessage(JSON.stringify(Object.assign({ cmd, id }, data || {})));
+      try {
+        nativeBridge().postMessage(JSON.stringify(Object.assign({ cmd, id }, data || {})));
+      } catch (e) {
+        clearTimeout(entry.timer);
+        pending.delete(id);
+        reject(e);
+      }
     } else {
       // Browser dev fallback: serve canned data so the UI is stylable offline.
       setTimeout(() => mockReply(cmd, id), 30);
     }
   });
+}
+
+function settlePending(id, data) {
+  const p = pending.get(id);
+  if (!p) return;
+  pending.delete(id);
+  if (p.timer) clearTimeout(p.timer);
+  p.resolve(data);
 }
 
 function mockReply(cmd, id) {
@@ -773,20 +800,16 @@ function mockReply(cmd, id) {
     "ps3:dismiss": () => ({ ok: true }),
     "runtime:logs": () => ({ ok: true, lines: [] }),
   };
-  const p = pending.get(id);
-  if (!p) return;
-  pending.delete(id);
   const handler = builtins[cmd];
-  if (handler) p.resolve(handler());
-  else p.resolve({ ok: true, [cmd.replace(/[^a-z]/g, "_")]: [] });
+  const data = handler ? handler() : { ok: true, [cmd.replace(/[^a-z]/g, "_")]: [] };
+  settlePending(id, data);
 }
 
 /* Rust -> JS dispatcher. */
 window.novaShellDispatch = function (msg) {
   if (!msg) return;
   if (msg.reply) {
-    const p = pending.get(msg.id);
-    if (p) { pending.delete(msg.id); p.resolve(msg.data); }
+    settlePending(msg.id, msg.data);
     return;
   }
   if (msg.event) handleEvent(msg);
@@ -809,8 +832,7 @@ function handleEvent(msg) {
       state.playing = null;
       refreshLibrary(true, false);
       setTimeout(renderTaskbar, 500);
-      break;
-    case "controller":
+      break;    case "controller":
       handleController(msg);
       break;
     case "settings_changed":
@@ -856,6 +878,12 @@ function handleEvent(msg) {
       toast("Installing " + (msg.id || "app") + " …");
       if (state.tab === "runtime-manager") rtRefresh();
       break;
+    case "application.started":
+    case "application.exited":
+      // A session opened or closed: the taskbar must react immediately.
+      renderTaskbar();
+      if (state.tab === "runtime-manager") rtRefresh();
+      break;
     case "application.installation.failed":
       toast("Install failed: " + (msg.error || "unknown"), "warn");
       if (state.tab === "runtime-manager") rtRefresh();
@@ -893,6 +921,12 @@ function indexFocus(container) {
   nav.grid = [];
   if (!container) return;
   container.querySelectorAll("[data-x][data-y]").forEach((el) => {
+    // Hidden and disabled rows must never receive focus: the old settings
+    // spacer row was invisible but focusable, so navigation dead-ended on it.
+    if (el.hidden || el.closest("[hidden]")) return;
+    if (el.getAttribute("aria-hidden") === "true") return;
+    const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+    if (style && (style.display === "none" || style.visibility === "hidden")) return;
     nav.grid.push({ el, x: parseInt(el.dataset.x, 10), y: parseInt(el.dataset.y, 10) });
   });
 }
@@ -961,11 +995,14 @@ function runAction(action, el) {
       goHome();
       break;
     case "win-focus":
-      post("windows:focus", { pid: Number(el.dataset.pid) || 0 });
+      post("windows:focus", { pid: Number(el.dataset.pid) || 0 }).then((r) => {
+        if (r && r.ok === false) toast("That window is not on screen any more", "warn");
+      }).catch(() => {});
       break;
     case "win-close":
-      post("windows:close", { pid: Number(el.dataset.pid) || 0 });
-      setTimeout(renderTaskbar, 300);
+      post("windows:close", { pid: Number(el.dataset.pid) || 0 }).then(() => {
+        setTimeout(renderTaskbar, 300);
+      }).catch(() => {});
       break;
     case "playing-dismiss":
       showPlaying(false);
@@ -975,6 +1012,7 @@ function runAction(action, el) {
       break;
     case "filter":
       state.filter = el.dataset.filter;
+      $$("#filters button").forEach((b) => b.classList.toggle("active", b.dataset.filter === state.filter));
       renderLibrary(true);
       break;
     case "launch":
@@ -1131,6 +1169,15 @@ function renderSlider(key) {
 
 /* --------------------------- Keyboard ------------------------------- */
 document.addEventListener("keydown", (e) => {
+  // Typing in a text field must never trigger shell shortcuts: without this,
+  // searching for a game containing "q" opened the quick menu instead.
+  const typing = e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable);
+  if (typing) {
+    // Escape and Enter still belong to the shell while the field has focus.
+    if (e.key === "Escape") { e.preventDefault(); back(); }
+    else if (e.key === "Enter") { e.preventDefault(); confirm(); }
+    return;
+  }
   if (e.key === "Tab") { e.preventDefault(); if (state.tab === "home") setTab("library"); else setTab("home"); return; }
   const k = e.key;
   if (k === "ArrowUp") { e.preventDefault(); moveFocus("up"); }
@@ -1220,6 +1267,10 @@ function focusFirst(container) {
 
 /* ------------------------------- Search ------------------------------ */
 function openSearch() {
+  // Overlays are exclusive: leaving another one open put Search behind/above an
+  // unrelated layer and sent Escape closing the wrong thing.
+  if (quickOpen()) closeQuick();
+  if (romOpen()) closeRomPicker();
   $("#search-ov").classList.add("open");
   const input = $("#search-input");
   input.value = "";
@@ -1230,6 +1281,9 @@ function openSearch() {
 function closeSearch() {
   $("#search-ov").classList.remove("open");
   renderSearch("", true);
+  // The results were the focus grid; without reindexing, arrow keys and Enter
+  // kept driving nodes that had just been deleted.
+  reindexCurrent();
   sfx.back();
 }
 function searchOpen() { return $("#search-ov").classList.contains("open"); }
@@ -1243,7 +1297,14 @@ function renderSearch(q, done) {
   const hits = qq
     ? state.library.filter((g) => g.title.toLowerCase().includes(qq)).slice(0, 24)
     : state.library.slice(0, 12);
-  if (!hits.length) { box.innerHTML = "<div id='empty-state'><strong>No matches</strong>Try a different name.</div>"; return; }
+  if (!hits.length) {
+    box.innerHTML = "<div id='empty-state'><strong>No matches</strong>Try a different name.</div>";
+    // No results means nothing to focus: clear the grid so navigation falls
+    // back to the screen behind the overlay.
+    nav.grid = [];
+    nav.current = null;
+    return;
+  }
   box.innerHTML = hits.map((g, i) => gameCard(g, i, 0)).join("");
   const first = box.querySelector("[data-x][data-y]");
   if (first) { indexFocus(box); focus(first); }
@@ -1432,7 +1493,13 @@ function romEnter(el) {
   if (action === "rom-dir") romGo(path);
   else if (action === "rom-file") launchRom(el, path);
   else if (action === "rom-choose") chooseRomFile(romState.game);
-  else if (action === "rom-files") { closeRomPicker(); post("roms:pick", { id: romState.game && romState.game.id }); }
+  else if (action === "rom-files") {
+    // Read the id before closing: closeRomPicker() clears romState.game, so
+    // reading it afterwards sent no id and the chosen file had no emulator.
+    const game = romState.game;
+    closeRomPicker();
+    if (game) post("roms:pick", { id: game.id });
+  }
   else if (action === "rom-browse") openRomBrowser(romState.game);
 }
 
@@ -1451,6 +1518,10 @@ function toggleQuick() {
   const qm = $("#quickmenu");
   if (qm.classList.contains("open")) closeQuick();
   else {
+    // Keep overlays exclusive: one open at a time.
+    if (searchOpen()) closeSearch();
+    if (romOpen()) closeRomPicker();
+    if ($("#rt-ov").classList.contains("open")) rtConfirmClose();
     renderQuick();
     qm.classList.add("open");
     const rows = qm.querySelectorAll(".row[data-x][data-y]");
@@ -1589,7 +1660,10 @@ function imgSrc(v) {
 }
 
 function gameCard(g, x, y) {
-  const src = { steam: "Steam", heroic: "Heroic", desktop: "Native", manual: "Manual", app: "App", emulator: g.platform || "Emulator" }[g.source] || g.source;
+  const srcLabel = { steam: "Steam", heroic: "Heroic", desktop: "Native", manual: "Manual", app: "App", emulator: g.platform || "Emulator" }[g.source] || g.source;
+  // Every interpolated value is escaped: ids, sources and platform names come
+  // from launcher metadata and can contain quotes or markup.
+  const src = esc(srcLabel);
   const badge = (g.favorite ? '<span class="badge fav">' + ic("star").replace('width="18"', 'width="10"').replace('height="18"', 'height="10"') + '</span>' : "") + '<span class="badge">' + src + "</span>";
   // Artwork is a wide box image and fills the tile; app icons are square logos
   // and are contained whole so they are never cropped. A failed image falls
@@ -1603,10 +1677,10 @@ function gameCard(g, x, y) {
   const subtitle = !g.installed
     ? "Not installed"
     : (g.source === "emulator"
-      ? (g.platform ? "Boot a " + g.platform + " game" : "Pick a ROM")
-      : (g.playtime || "Never played"));
+      ? (g.platform ? "Boot a " + esc(g.platform) + " game" : "Pick a ROM")
+      : esc(g.playtime || "Never played"));
   return (
-    '<div class="card' + (g.installed ? "" : " missing") + '" data-x="' + x + '" data-y="' + y + '" data-action="launch" data-gid="' + g.id + '">' +
+    '<div class="card' + (g.installed ? "" : " missing") + '" data-x="' + x + '" data-y="' + y + '" data-action="launch" data-gid="' + esc(g.id) + '">' +
       '<div class="badges">' + badge + "</div>" +
       cover +
       '<div class="meta"><span class="title">' + esc(g.title) + "</span>" +
@@ -1642,8 +1716,8 @@ function renderHome() {
   hero.innerHTML = heroGame
     ? '<div class="glow"></div><div class="content"><div class="eyebrow">' + (heroGame.last_played ? "Recently played" : "Featured") + "</div>" +
       '<div class="big">' + esc(heroGame.title) + "</div>" +
-      '<button class="btn play" data-x="0" data-y="1" data-action="launch" data-gid="' + heroGame.id + '">' + (heroGame.installed ? "Play " : "Install ") + ic("rocket") + "</button>" +
-      '<button class="btn ghost" data-x="1" data-y="1" data-action="toggle-fav" data-gid="' + heroGame.id + '">' + (heroGame.favorite ? "★" : "☆") + " Favorite</button></div>"
+      '<button class="btn play" data-x="0" data-y="1" data-action="launch" data-gid="' + esc(heroGame.id) + '">' + (heroGame.installed ? "Play " : "Install ") + ic("rocket") + "</button>" +
+      '<button class="btn ghost" data-x="1" data-y="1" data-action="toggle-fav" data-gid="' + esc(heroGame.id) + '">' + (heroGame.favorite ? "★" : "☆") + " Favorite</button></div>"
     : '<div class="glow"></div><div class="content"><div class="eyebrow">Welcome to</div><div class="big">NovaShell</div><p style="color:var(--text-dim)">No games yet — add your launchers in Settings.</p></div>';
 
   const allBox = $("#all-grid");
@@ -1683,15 +1757,31 @@ function renderLibrary(keepFocus) {
   const list = state.library.filter(f);
   $("#lib-count").textContent = list.length + " of " + state.library.length;
   $("#empty-state").hidden = list.length > 0;
+  // Remember what the user had focused across the innerHTML replacement.
+  const focusKey = keepFocus && nav.current ? focusedKey(nav.current) : null;
   box.innerHTML = list.length
     ? list.map((g, i) => gameCardWithIndex(g, i)).join("")
     : "";
   $$("#filters button").forEach((b) => b.classList.toggle("active", b.dataset.filter === state.filter));
-  if (!keepFocus) {
-    const screen = $(".screen[data-screen=library]");
-    indexFocus(screen);
-    focusFirst(screen);
+  const screen = $(".screen[data-screen=library]");
+  // Always reindex: without it the focus grid still pointed at cards that the
+  // innerHTML assignment had just deleted, so arrow keys drove detached nodes.
+  indexFocus(screen);
+  if (focusKey) {
+    const restored = nav.grid.find((f) => focusedKey(f.el) === focusKey);
+    if (restored) { focus(restored.el); return; }
   }
+  if (!keepFocus) focusFirst(screen);
+}
+
+/// A stable identity for a focusable element, used to restore focus after a
+/// re-render replaces the DOM.
+function focusedKey(el) {
+  if (!el) return null;
+  const d = el.dataset || {};
+  if (d.gid) return "gid:" + d.gid;
+  if (d.action) return "act:" + d.action + ":" + (d.pid || "") + (d.path || "") + (d.rt || "") + (d.id || "") + (d.key || "");
+  return null;
 }
 
 function gameCardWithIndex(g, i) {
@@ -1859,7 +1949,7 @@ function rtPs3Panel() {
     const blockers = (f.prereqs && f.prereqs.blockers) || [];
     rows.push('<div class="row" data-x="0" data-y="' + y + '">' +
       '<span class="info"><span class="k">' + esc(f.name) + "</span>" +
-      '<div class="d">' + esc(f.kind.toUpperCase()) + "  ·  " + esc(rtSize(f.size_bytes)) + (f.title_id ? "  ·  " + esc(f.title_id) : "  ·  unnamed package") + "</div>" +
+      '<div class="d">' + esc(String(f.kind || "package").toUpperCase()) + "  ·  " + esc(rtSize(f.size_bytes)) + (f.title_id ? "  ·  " + esc(f.title_id) : "  ·  unnamed package") + "</div>" +
       (blockers.length
         ? '<div class="d" style="color:#fbbf24">' + esc(blockers[0]) + (blockers.length > 1 ? " (+" + (blockers.length - 1) + " more)" : "") + "</div>"
         : "") +
@@ -1910,6 +2000,10 @@ function rtPs3Install(path, el) {
 function renderRuntimeManager() {
   const col = $("#rt-col");
   if (!col) return;
+  // A poll that lands while a confirmation is open must not re-index the
+  // screen behind it: that stripped focus from the confirm button and left
+  // Enter driving a hidden background row.
+  if ($("#rt-ov").classList.contains("open")) return;
   const pend = (state.rt.pending || []).length;
   $("#rt-sub").textContent =
     state.rt.runtimes.filter((r) => String(r.status).toLowerCase() === "available").length +
@@ -1935,7 +2029,14 @@ function renderRuntimeManager() {
     '<div class="panel"><h3>Prefixes</h3>' + rtPrefixRows() + "</div>" +
     '<div class="panel"><h3>Running sessions</h3>' + rtProcessRows() + "</div>" +
     logPanel;
+  // Keep the user's place across the 4-second poll: re-index, then restore the
+  // previously focused row by identity instead of jumping back to the top.
+  const before = nav.current ? focusedKey(nav.current) : null;
   reindexCurrent();
+  if (before) {
+    const restored = nav.grid.find((f) => focusedKey(f.el) === before);
+    if (restored) focus(restored.el);
+  }
 }
 
 function rtValidate(id) {
@@ -2057,7 +2158,10 @@ function renderSettings() {
   });
 }
 
-function emptyRow() { return '<div class="row" data-x="0" data-y="99" data-action="void" hidden></div>'; }
+// A hidden spacer row used to pad the settings layout. It carried data-x/data-y
+// and a `void` action, so controller navigation could land on an invisible
+// element; `indexFocus` now skips hidden nodes and this emits no coordinates.
+function emptyRow() { return '<div class="row" aria-hidden="true"></div>'; }
 
 function sliderRow(key, y, label, desc) {
   return '<div class="row" data-x="0" data-y="' + y + '" data-slider="' + key + '"><span class="info"><span class="k">' + label + '</span><div class="d">' + desc + "</div></span><div class=\"slider-row\"><div class=\"slider\"><div class=\"fill\"></div><div class=\"knob\"></div></div><span class=\"pct\">--%</span></div></div>";
@@ -2097,15 +2201,23 @@ function settingsSet(el) {
   const key = el.dataset.set;
   const payload = {};
   if (key === "steam_enabled" || key === "heroic_enabled" || key === "desktop_enabled") {
-    payload[key] = !(state.config.launchers && state.config.launchers[key]);
-  } else if (key === "performance_mode") {
-    payload[key] = !state.config.performance_mode;
+    // Launcher toggles live under `launchers` in the config. The old code wrote
+    // them at the top level, so the rendered switch (which reads
+    // config.launchers[key]) never changed and each press toggled the same
+    // unchanged value.
+    const next = !(state.config.launchers && state.config.launchers[key]);
+    payload[key] = next;
+    state.config = Object.assign({}, state.config, {
+      launchers: Object.assign({}, state.config.launchers, { [key]: next }),
+    });
   } else {
-    payload[key] = !state.config[key];
+    const next = !state.config[key];
+    payload[key] = next;
+    state.config = Object.assign({}, state.config, { [key]: next });
   }
   post("settings:set", payload);
-  state.config = Object.assign({}, state.config, payload);
-  if (key === "performance_mode") applyTheme();
+  // Animations and performance mode both change how the UI is drawn.
+  if (key === "performance_mode" || key === "animations") applyTheme();
   syncSettingsUI($("#settings-col"), state.config);
   refreshLibrary(true, false);
 }
@@ -2149,13 +2261,17 @@ function showPlaying(open) {
 // Close the app the shell launched (its whole process group), then return.
 function quitRunningApp() {
   post("windows:list").then((r) => {
-    const app = ((r && r.windows) || []).find((w) => w.kind === "app");
-    if (!app) { toast("Nothing is running", "warn"); showPlaying(false); return; }
-    post("windows:close", { pid: app.pid });
-    showPlaying(false);
-    toast("Closed " + app.title);
-    setTimeout(renderTaskbar, 400);
-  });
+    const windows = ((r && r.windows) || []).filter((w) => w.kind !== "shell");
+    if (!windows.length) { toast("Nothing is running", "warn"); showPlaying(false); return; }
+    // Close the foreground session, falling back to the first open window so
+    // the button also works for Wine/Proton apps and helpers.
+    const app = windows.find((w) => w.kind === "app") || windows[0];
+    post("windows:close", { pid: app.pid }).then(() => {
+      showPlaying(false);
+      toast("Closed " + app.title);
+      setTimeout(renderTaskbar, 400);
+    });
+  }).catch(() => { toast("Nothing is running", "warn"); showPlaying(false); });
 }
 
 function captureScreenshot() {  post("system:screenshot", { mode: (state.config || {}).screenshot_mode || "auto" }).then((r) => {
@@ -2199,16 +2315,19 @@ function renderTaskbar() {
   if (!box) return;
   post("windows:list").then((r) => {
     if (!r || !r.windows) return;
+    state.taskbar = r.windows;
     if (!r.windows.length) { box.innerHTML = '<span class="tb-empty">nothing open</span>'; return; }
     box.innerHTML = r.windows.map((w) => {
       const initial = (w.title || "?").trim().charAt(0).toUpperCase();
       const close = w.kind === "shell" ? "" :
         '<button class="x" data-action="win-close" data-pid="' + w.pid + '" title="Close">×</button>';
-      return '<div class="tb-item" data-action="win-focus" data-pid="' + w.pid + '" data-x="-1" data-y="-1">' +
+      const kind = w.kind && w.kind !== "shell"
+        ? '<span class="kind">' + esc(w.kind) + "</span>" : "";
+      return '<div class="tb-item' + (w.active ? " active" : "") + '" data-action="win-focus" data-pid="' + w.pid + '" title="' + esc(w.title) + '">' +
         '<span class="dot">' + esc(initial) + "</span>" +
-        '<span class="nm">' + esc(w.title) + "</span>" + close + "</div>";
+        '<span class="nm">' + esc(w.title) + "</span>" + kind + close + "</div>";
     }).join("");
-  });
+  }).catch(() => {});
 }
 let taskbarTimer = null;
 function startTaskbar() {
@@ -2224,8 +2343,19 @@ function startTaskbar() {
 
 /* ------------------------------ Boot --------------------------------- */
 async function boot() {
-  const r = await post("boot");
-  if (!r || !r.config) { toast("Bridge unavailable — dev mock mode", "warn"); r.config = state.config; r.library = { games: [] }; }
+  let r = null;
+  try {
+    r = await post("boot");
+  } catch (e) {
+    // A lost or malformed boot reply must not leave the shell blank.
+    r = null;
+  }
+  if (!r || !r.config) {
+    toast("Bridge unavailable — dev mock mode", "warn");
+    // Build a fresh object: the old code assigned to `r`, which threw when the
+    // bridge replied with null.
+    r = { config: state.config, library: { games: [] }, status: {}, identity: {} };
+  }
   state.config = Object.assign({}, state.config, r.config || {});
   state.library = (r.library && r.library.games) || [];
   state.status = r.status || {};

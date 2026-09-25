@@ -8,6 +8,24 @@ echo "==> Uninstalling NovaShell"
 systemctl --user disable novashell >/dev/null 2>&1 || true
 systemctl --user stop novashell >/dev/null 2>&1 || true
 
+# The system service installed by scripts/install-service.sh lives here, and it
+# runs on boot. The old script only removed /etc/systemd/user/..., so the shell
+# kept restarting after an "uninstall".
+if [ "$(id -u)" -eq 0 ]; then
+  if systemctl list-unit-files novashell.service >/dev/null 2>&1; then
+    systemctl disable --now novashell.service >/dev/null 2>&1 || true
+  fi
+  for f in /etc/systemd/system/novashell.service /etc/tmpfiles.d/novashell.conf; do
+    if [ -e "$f" ]; then
+      rm -f "$f"
+      echo "    removed $f"
+    fi
+  done
+  systemctl daemon-reload >/dev/null 2>&1 || true
+else
+  echo "    note: run as root (or with sudo) to remove the system service"
+fi
+
 for scope in user system; do
   case "$scope" in
     user)

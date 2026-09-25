@@ -260,8 +260,18 @@ pub fn place_license(license: &Path, title_id: &str) -> Result<PathBuf> {
     let ext = license
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_else(|| "rap".into());
-    let dest = ex.join(format!("{title_id}.{ext}"));
+        .unwrap_or_default();
+    // Only real license types, and a title id that cannot escape exdata: a
+    // crafted id like `../../config` would otherwise write outside it.
+    if !matches!(ext.as_str(), "rap" | "edat") {
+        anyhow::bail!("{} is not a PS3 license file", license.display());
+    }
+    let safe_id = crate::runtime::security::safe_segment(title_id)
+        .context("refusing an unsafe PS3 title id")?;
+    if safe_id.contains(std::path::MAIN_SEPARATOR) || safe_id.contains('/') {
+        anyhow::bail!("refusing an unsafe PS3 title id: {title_id}");
+    }
+    let dest = ex.join(format!("{safe_id}.{ext}"));
     std::fs::copy(license, &dest)
         .with_context(|| format!("copying {} to {}", license.display(), dest.display()))?;
     Ok(dest)
@@ -273,7 +283,8 @@ pub fn place_license(license: &Path, title_id: &str) -> Result<PathBuf> {
 /// no-gui mode!"), so the install runs in its normal windowed mode. This blocks
 /// until RPCS3 exits, so callers must run it off the UI thread.
 pub fn install_package(pkg: &Path) -> Result<PathBuf> {
-    let rpcs3 = find_rpcs3().context("RPCS3 is not installed")?;
+    // Validate the package before looking for the emulator: a caller passing
+    // the wrong file should hear about that, not about a missing RPCS3.
     if !pkg.is_file() {
         anyhow::bail!("no such package: {}", pkg.display());
     }
@@ -284,6 +295,7 @@ pub fn install_package(pkg: &Path) -> Result<PathBuf> {
     if ext != PKG_EXTENSION {
         anyhow::bail!("{} is not a .pkg", pkg.display());
     }
+    let rpcs3 = find_rpcs3().context("RPCS3 is not installed")?;
 
     // A licence sitting next to the package is copied into place first, so
     // RPCS3 finds it instead of aborting the install.
@@ -302,7 +314,7 @@ pub fn install_package(pkg: &Path) -> Result<PathBuf> {
     }
 
     // No --no-gui: this RPCS3 build rejects installation in that mode.
-    let mut child = std::process::Command::new(&rpcs3)
+    let child = std::process::Command::new(&rpcs3)
         .arg("--installpkg")
         .arg(pkg)
         .current_dir(rpcs3_config_dir().unwrap_or_else(|| PathBuf::from(".")))
@@ -328,7 +340,9 @@ pub fn install_package(pkg: &Path) -> Result<PathBuf> {
         ));
     }
 
-    // RPCS3 exits 0 even when it aborts, so the outcome is read from its output.
+    // RPCS3 exits 0 even when it aborts, so the outcome is read from its output
+    // and, more importantly, from the filesystem: an install that produced no
+    // game directory did not install anything.
     let combined = format!("{stdout}{stderr}");
     if combined.contains("Failed to locate the game license file") {
         anyhow::bail!(
@@ -336,10 +350,44 @@ pub fn install_package(pkg: &Path) -> Result<PathBuf> {
         );
     }
     if combined.contains("Cannot perform installation") {
-        anyhow::bail!("RPCS3 refused the installation: {}", combined.lines().last().unwrap_or(""));
+        anyhow::bail!(
+            "RPCS3 refused the installation: {}",
+            combined.lines().last().unwrap_or("")
+        );
     }
     if !output.status.success() {
         anyhow::bail!("RPCS3 could not install the package");
+    }
+
+    // A zero exit is not proof of success: verify the title actually landed.
+    let before = scan_installed_games().len();
+    if let Some(tid) = pkg
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(parse_title_id)
+    {
+        let landed = || {
+            rpcs3_config_dir()
+                .map(|c| c.join("games").join(&tid).join("EBOOT.BIN").is_file())
+                .unwrap_or(false)
+        };
+        if !landed() {
+            // Give the filesystem a moment before declaring failure.
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            if !landed() {
+                anyhow::bail!(
+                    "RPCS3 reported success but {tid} is not in its games folder; nothing was installed"
+                );
+            }
+        }
+        return Ok(pkg.to_path_buf());
+    }
+
+    let after = scan_installed_games().len();
+    if after <= before {
+        anyhow::bail!(
+            "RPCS3 finished but installed no new game; check its log for a decryption or format error"
+        );
     }
     Ok(pkg.to_path_buf())
 }

@@ -179,6 +179,8 @@ mod tests {
 
     #[test]
     fn decisions_roundtrip_in_a_temp_data_dir() {
+        // Shares the process-global data-dir override with the library tests.
+        let _guard = crate::util::test_dir_lock();
         let dir = std::env::temp_dir().join(format!("nova-dec-{}", std::process::id()));
         std::env::set_var("NOVASHELL_DATA_DIR", &dir);
         let mut d = Decisions::default();

@@ -156,11 +156,28 @@ impl ProtonRuntime {
         let mut child = child;
         let deadline = std::time::Instant::now() + Duration::from_millis(2000);
         loop {
-            if let Ok(Some(status)) = child.try_wait() {
-                return status.success().then_some(String::new());
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => {
+                    // Read the real version instead of reporting an empty one.
+                    use std::io::Read;
+                    let mut text = String::new();
+                    if let Some(mut s) = child.stdout.take() {
+                        let _ = s.read_to_string(&mut text);
+                    }
+                    let line = text
+                        .lines()
+                        .map(str::trim)
+                        .find(|l| !l.is_empty())
+                        .unwrap_or("unknown");
+                    return Some(line.to_string());
+                }
+                Ok(Some(_)) => return None,
+                _ => {}
             }
             if std::time::Instant::now() > deadline {
                 let _ = child.kill();
+                // Reap, or every detection pass leaks a zombie.
+                let _ = child.wait();
                 return None;
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -249,8 +266,9 @@ impl Runtime for ProtonRuntime {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("no Proton build"))?;
         let args = build.run_args(exe, &target.args);
-        let mut spec = Spec::new(&target.title, "python3").arg(script.to_string_lossy().to_string());
-        spec = spec.args(args);
+        let mut spec = Spec::new(&target.title, "python3")
+            .arg(script.to_string_lossy().to_string())
+            .args(args);
         if let Some(prefix) = &target.prefix {
             spec = spec.env("STEAM_COMPAT_DATA_PATH", prefix.to_string_lossy().to_string());
             spec = spec.env("WINEPREFIX", prefix.join("pfx").to_string_lossy().to_string());
@@ -294,6 +312,35 @@ mod tests {
         let rt = ProtonRuntime::missing();
         let t = LaunchTarget::new("g", "G").with_executable("/bin/sh");
         assert!(rt.build_spec(&t).is_err());
+    }
+
+    /// `python3 <proton> run <game>` — the script path is the first argument
+    /// and must not be replaced by `run <game>`.
+    #[test]
+    fn build_spec_keeps_the_proton_script_first() {
+        let dir = std::env::temp_dir().join(format!("nova-protonspec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("proton");
+        std::fs::write(&script, b"x").unwrap();
+        let exe = dir.join("game.exe");
+        std::fs::write(&exe, b"x").unwrap();
+
+        let rt = ProtonRuntime::found(ProtonBuild {
+            id: "proton-test".into(),
+            name: "Proton Test".into(),
+            script: script.clone(),
+            origin: dir.to_string_lossy().to_string(),
+        });
+        let mut t = LaunchTarget::new("Game", "Game").with_executable(&exe);
+        t.args = vec!["-dx11".to_string()];
+        let spec = rt.build_spec(&t).expect("spec");
+        assert_eq!(spec.program, "python3");
+        assert_eq!(spec.args[0], script.to_string_lossy().to_string());
+        assert_eq!(spec.args[1], "run");
+        assert_eq!(spec.args[2], exe.to_string_lossy().to_string());
+        assert_eq!(spec.args[3], "-dx11");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
