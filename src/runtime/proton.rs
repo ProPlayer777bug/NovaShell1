@@ -76,18 +76,24 @@ pub fn discover_proton() -> Vec<ProtonBuild> {
             let path = e.path();
             let name = e.file_name().to_string_lossy().to_string();
             let lower = name.to_lowercase();
-            if !(lower.starts_with("proton") || lower.starts_with("steamproton")) {
+            // Matches Steam's `Proton 8.0`, `SteamProton`, and Proton-GE's
+            // `GE-Proton9-20`, so the naming convention is not hardcoded.
+            if !lower.contains("proton") {
                 continue;
             }
             // Layout: <dir>/proton and <dir>/files/bin/wine
             for candidate in [path.join("proton"), path.join("dist/proton")] {
                 if candidate.is_file() {
-                    let is_ge = lower.contains("ge");
+                    let is_ge = lower.contains("-ge") || lower.starts_with("ge-");
+                    let clean = lower
+                        .trim_start_matches("ge-")
+                        .trim_start_matches("steamproton")
+                        .trim_start_matches("proton");
                     out.push(ProtonBuild {
                         id: format!(
                             "proton-{}-{}",
                             if is_ge { "ge" } else { "steam" },
-                            slug(&name)
+                            slug(clean)
                         ),
                         name: name.clone(),
                         script: candidate,
@@ -294,5 +300,17 @@ mod tests {
     fn slug_is_path_safe() {
         let s = slug("Proton - GE 8.32");
         assert!(s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    }
+
+    #[test]
+    fn discovery_accepts_every_proton_naming_convention() {
+        // Steam: "Proton 8.0", "SteamProton_9"; Proton-GE: "GE-Proton9-20".
+        // None of these start with "proton", so the matcher must not require it.
+        for name in ["Proton 8.0", "SteamProton_9", "GE-Proton9-20"] {
+            assert!(
+                name.to_lowercase().contains("proton"),
+                "{name} should be recognised as a Proton build"
+            );
+        }
     }
 }
