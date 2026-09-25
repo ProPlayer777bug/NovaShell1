@@ -18,6 +18,7 @@ pub mod logs;
 pub mod native;
 pub mod prefixes;
 pub mod procs;
+pub mod ps3;
 pub mod security;
 
 #[cfg(target_os = "linux")]

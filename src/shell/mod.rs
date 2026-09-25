@@ -37,6 +37,9 @@ pub struct RunOptions {
     /// `novashell --install-associations`: register Nova as the handler for
     /// Windows file types. Run from the install script and the setup screen.
     pub install_associations: bool,
+    /// `novashell --ps3-file <file>`: a PS3 package was opened from the file
+    /// manager. It is recorded as waiting for the user to confirm the install.
+    pub ps3_file: Option<String>,
 }
 
 /// Normalise `$HOME` so the data dirs (library, config, logs) are the same
@@ -155,6 +158,7 @@ pub fn parse_args() -> RunOptions {
         play: None,
         win_file: None,
         install_associations: false,
+        ps3_file: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -184,6 +188,13 @@ pub fn parse_args() -> RunOptions {
             // `novashell --install-associations`: register the .exe/.msi
             // handlers so the file manager routes them through this shell.
             "--install-associations" => o.install_associations = true,
+            // `novashell --ps3-file <pkg>`: a PS3 package was opened from the
+            // file manager. It is queued for confirmation, never installed
+            // silently by this process.
+            "--ps3-file" => o.ps3_file = args.next(),
+            other if other.starts_with("--ps3-file=") => {
+                o.ps3_file = Some(other["--ps3-file=".len()..].to_string())
+            }
             _ => {}
         }
     }
@@ -463,6 +474,28 @@ pub fn run(opts: RunOptions) -> Result<()> {
         return play_game_file(&path);
     }
 
+    // A PS3 package was opened from the file manager. Record it so the user can
+    // confirm the install in the Runtime Manager; nothing is installed here.
+    if let Some(path) = opts.ps3_file.clone() {
+        normalize_home();
+        let file = std::path::PathBuf::from(&path);
+        let dir = file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let found = crate::runtime::ps3::find_installables(&dir)
+            .into_iter()
+            .find(|i| i.path == file);
+        match found {
+            Some(pkg) => {
+                crate::runtime::decisions::Decisions::default().add_pending_pkg(pkg);
+                eprintln!("novashell: queued {path} — confirm the install in Nova Shell");
+            }
+            None => {
+                eprintln!("novashell: not an installable PS3 package: {path}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
     // Registering the Windows file associations is a one-shot system change,
     // so it is an explicit flag rather than something a normal launch does.
     if opts.install_associations {
@@ -669,7 +702,8 @@ fn activate(
     // One-time full library scan; refresh happens on demand from the UI.
     let mut library = Library::load();
     {
-        let found = crate::plugins::scan(&cfg);
+        let mut found = crate::plugins::scan(&cfg);
+        found.extend(ps3_library_entries());
         let seen: std::collections::HashSet<String> =
             found.iter().map(|g| g.id.clone()).collect();
         library.merge(found);
@@ -1194,6 +1228,105 @@ fn route(state: &AppState, msg: Value) {
             );
         }
 
+        // PS3 packages opened from the file manager, and installed PS3 games.
+        "ps3:installables" => {
+            let dir = msg["dir"].as_str().unwrap_or("");
+            let path = if dir.is_empty() {
+                dirs::home_dir().unwrap_or_default().join("PS3")
+            } else {
+                std::path::PathBuf::from(util::expand_tilde(dir))
+            };
+            reply(
+                state,
+                id,
+                json!({
+                    "ok": true,
+                    "dir": path.to_string_lossy(),
+                    "installables": crate::runtime::ps3::find_installables(&path),
+                    "installed": crate::runtime::ps3::scan_installed_games(),
+                    "firmware": crate::runtime::ps3::firmware_installed(),
+                    "rpcs3": crate::runtime::ps3::find_rpcs3().map(|p| p.to_string_lossy().to_string()),
+                }),
+            );
+        }
+
+        // Install a .pkg into RPCS3. Slow, so it runs on a worker thread.
+        "ps3:install" => {
+            let path = msg["path"].as_str().unwrap_or("").to_string();
+            if path.is_empty() {
+                reply(state, id, json!({ "ok": false, "error": "no package given" }));
+                return;
+            }
+            let sender = state.sender.clone();
+            let rid = id.to_string();
+            std::thread::Builder::new()
+                .name("novashell-ps3-install".into())
+                .spawn(move || {
+                    let result = crate::runtime::ps3::install_package(std::path::Path::new(&path));
+                    let payload = match &result {
+                        Ok(_) => json!({ "reply": true, "id": rid, "data": {
+                            "ok": true,
+                            "installed": crate::runtime::ps3::scan_installed_games(),
+                            "firmware": crate::runtime::ps3::firmware_installed(),
+                        }}),
+                        Err(e) => json!({ "reply": true, "id": rid, "data": {
+                            "ok": false, "error": e.to_string(),
+                        }}),
+                    };
+                    let _ = sender.send(payload.to_string());
+                    let event = if result.is_ok() {
+                        json!({ "event": "ps3.installed", "path": path })
+                    } else {
+                        json!({ "event": "ps3.install_failed", "path": path })
+                    };
+                    let _ = sender.send(event.to_string());
+                })
+                .ok();
+        }
+
+        // PS3 packages waiting for the user to confirm an install.
+        "ps3:pending" => {
+            let pending: Vec<crate::runtime::ps3::Installable> =
+                crate::runtime::decisions::Decisions::load_pending_pkgs();
+            // Preflight every pending package so the UI can say up front what is
+            // missing instead of letting a long install fail at the end.
+            let with_pre: Vec<Value> = pending
+                .iter()
+                .map(|p| {
+                    let mut v = serde_json::to_value(p).unwrap_or(Value::Null);
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert(
+                            "prereqs".into(),
+                            serde_json::to_value(crate::runtime::ps3::check_install_prereqs(
+                                &p.path,
+                            ))
+                            .unwrap_or(Value::Null),
+                        );
+                    }
+                    v
+                })
+                .collect();
+            reply(
+                state,
+                id,
+                json!({
+                    "ok": true,
+                    "pending": with_pre,
+                    "firmware": crate::runtime::ps3::firmware_installed(),
+                    "installed": crate::runtime::ps3::scan_installed_games(),
+                }),
+            );
+        }
+
+        // Dismiss a package without installing it.
+        "ps3:dismiss" => {
+            let path = msg["path"].as_str().unwrap_or("").to_string();
+            if !path.is_empty() {
+                crate::runtime::decisions::Decisions::clear_pending_pkg(std::path::Path::new(&path));
+            }
+            reply(state, id, json!({ "ok": true }));
+        }
+
         // Windows application catalogue.
         "windows:apps" => {
             let apps = state.win_apps.lock().map(|g| g.clone()).unwrap_or_default();
@@ -1714,9 +1847,39 @@ fn system_power(action: &str) -> Result<()> {
     }
 }
 
+/// PS3 games installed into RPCS3, as library entries that boot through
+/// RPCS3's own launcher (so firmware/config handling stays with the emulator).
+fn ps3_library_entries() -> Vec<crate::games::Game> {
+    let Some(rpcs3) = crate::runtime::ps3::find_rpcs3() else {
+        return Vec::new();
+    };
+    crate::runtime::ps3::scan_installed_games()
+        .into_iter()
+        .map(|g| crate::games::Game {
+            id: format!("ps3-{}", g.title_id),
+            title: g.name,
+            source: "ps3".into(),
+            launch: crate::games::Launch::Program {
+                program: rpcs3.to_string_lossy().to_string(),
+                args: vec!["--no-gui".into(), g.eboot.to_string_lossy().to_string()],
+            },
+            icon: None,
+            artwork: None,
+            last_played: None,
+            playtime_secs: 0,
+            favorite: false,
+            installed: true,
+            platform: Some("PS3".into()),
+            rom_exts: Vec::new(),
+            rom_dir: None,
+        })
+        .collect()
+}
+
 fn refresh_library(state: &AppState) -> Vec<Value> {
     let cfg = state.config.borrow().clone();
-    let found = crate::plugins::scan(&cfg);
+    let mut found = crate::plugins::scan(&cfg);
+    found.extend(ps3_library_entries());
     let mut lib = state.library.borrow_mut();
     let seen: std::collections::HashSet<String> = found.iter().map(|g| g.id.clone()).collect();
     lib.merge(found);

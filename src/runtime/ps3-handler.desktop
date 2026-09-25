@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Install PS3 package with NovaShell
+GenericName=PS3 Package Installer
+Comment=Install this PS3 package into RPCS3 through Nova Shell
+Exec=novashell --ps3-file %f
+TryExec=novashell
+Terminal=false
+NoDisplay=true
+Categories=Game;Emulator;PackageManager;
+MimeType=application/x-ps3-pkg;application/x-ps3-rap;application/x-ps3-edat;

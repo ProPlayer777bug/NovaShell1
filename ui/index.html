@@ -768,6 +768,9 @@ function mockReply(cmd, id) {
     "windows:pending": () => ({ ok: true, pending: [] }),
     "windows:associations": () => ({ ok: true }),
     "windows:decide": () => ({ ok: true }),
+    "ps3:pending": () => ({ ok: true, pending: [], installed: [], firmware: false }),
+    "ps3:install": () => ({ ok: true, installed: [], firmware: false }),
+    "ps3:dismiss": () => ({ ok: true }),
     "runtime:logs": () => ({ ok: true, lines: [] }),
   };
   const p = pending.get(id);
@@ -845,6 +848,8 @@ function handleEvent(msg) {
     case "prefix.created":
     case "prefix.deleted":
     case "windows.file_decided":
+    case "ps3.installed":
+    case "ps3.install_failed":
       if (state.tab === "runtime-manager") rtRefresh();
       break;
     case "application.installation.started":
@@ -1032,6 +1037,13 @@ function runAction(action, el) {
     case "proc-stop": rtPidAction("procs:stop", el.dataset.pid); break;
     case "proc-kill": rtPidAction("procs:kill", el.dataset.pid); break;
     case "wf-decide": rtDecide(el.dataset.path, el.dataset.runtime); break;
+    case "ps3-install": rtPs3Install(el.dataset.path, el); break;
+    case "ps3-dismiss":
+      post("ps3:dismiss", { path: el.dataset.path }).then(() => {
+        toast("Package dismissed", "ok");
+        rtRefresh();
+      });
+      break;
     case "rt-confirm-close": rtConfirmClose(); break;
     case "rt-confirm-yes": rtConfirmAccept(); break;
   }
@@ -1696,6 +1708,7 @@ state.rt = {
   prefixes: [],
   processes: [],
   pending: [],
+  ps3: { pending: [], installed: [], firmware: false },
   logFor: null,
   logLines: [],
   loading: false,
@@ -1732,12 +1745,14 @@ function rtRefresh() {
     post("prefixes:list").catch(() => null),
     post("procs:list").catch(() => null),
     post("windows:pending").catch(() => null),
-  ]).then(([rt, px, pr, pend]) => {
+    post("ps3:pending").catch(() => null),
+  ]).then(([rt, px, pr, pend, ps3]) => {
     state.rt.loading = false;
     if (rt && rt.runtimes) state.rt.runtimes = rt.runtimes;
     if (px && px.prefixes) state.rt.prefixes = px.prefixes;
     if (pr && pr.processes) state.rt.processes = pr.processes;
     if (pend && pend.pending) state.rt.pending = pend.pending;
+    if (ps3) state.rt.ps3 = ps3;
     if (state.tab === "runtime-manager") renderRuntimeManager();
   }).catch(() => { state.rt.loading = false; });
 }
@@ -1825,6 +1840,73 @@ function rtPendingRows() {
   }).join("");
 }
 
+function rtPs3Panel() {
+  const p = state.rt.ps3 || {};
+  const pending = p.pending || [];
+  const installed = p.installed || [];
+  const rows = [];
+  let y = 400;
+  if (!p.firmware) {
+    rows.push('<div class="row" data-x="0" data-y="' + y++ + '"><span class="info"><span class="k">PS3 firmware not installed</span>' +
+      '<div class="d">Packages can still be installed, but RPCS3 cannot boot a PS3 game until firmware is present</div></span>' +
+      '<span class="pill warn">Firmware</span></div>');
+  }
+  if (!pending.length && !installed.length) {
+    rows.push('<div class="row" data-x="0" data-y="' + y++ + '"><span class="info"><span class="k">No PS3 packages waiting</span>' +
+      '<div class="d">Open a .pkg from Files and it will be offered here before anything is installed</div></span></div>');
+  }
+  pending.forEach((f) => {
+    const blockers = (f.prereqs && f.prereqs.blockers) || [];
+    rows.push('<div class="row" data-x="0" data-y="' + y + '">' +
+      '<span class="info"><span class="k">' + esc(f.name) + "</span>" +
+      '<div class="d">' + esc(f.kind.toUpperCase()) + "  ·  " + esc(rtSize(f.size_bytes)) + (f.title_id ? "  ·  " + esc(f.title_id) : "  ·  unnamed package") + "</div>" +
+      (blockers.length
+        ? '<div class="d" style="color:#fbbf24">' + esc(blockers[0]) + (blockers.length > 1 ? " (+" + (blockers.length - 1) + " more)" : "") + "</div>"
+        : "") +
+      '<div class="rt-note">' + esc(f.path) + "</div></span>" +
+      '<span class="pill ' + (blockers.length ? "warn" : "ok") + '">' + (blockers.length ? "Blocked" : "Ready") + "</span>" +
+      '<span class="rt-acts">' +
+      (blockers.length
+        ? ""
+        : '<span class="mini" data-x="1" data-y="' + y + '" data-action="ps3-install" data-path="' + esc(f.path) + '">Install</span>') +
+      '<span class="mini danger" data-x="2" data-y="' + y + '" data-action="ps3-dismiss" data-path="' + esc(f.path) + '">Dismiss</span>' +
+      "</span></div>");
+    y++;
+  });
+  installed.forEach((g) => {
+    rows.push('<div class="row" data-x="0" data-y="' + y + '">' +
+      '<span class="info"><span class="k">' + esc(g.name) + "</span>" +
+      '<div class="d">Installed in RPCS3  ·  ' + esc(g.title_id) + "</div>" +
+      '<div class="rt-note">' + esc(g.eboot) + "</div></span>" +
+      '<span class="pill ok">Installed</span></div>');
+    y++;
+  });
+  return rows.join("");
+}
+
+function rtPs3Install(path, el) {
+  const name = String(path).split("/").pop();
+  rtConfirm(
+    "Install " + name + "?",
+    "RPCS3 installs the package in the background. This can take a few minutes for a large game.",
+    "Install",
+    () => {
+      if (el) { el.textContent = "Installing…"; el.classList.add("busy"); }
+      toast("Installing " + name + " …");
+      post("ps3:install", { path: path }).then((r) => {
+        if (r && r.ok === false) {
+          toast("Install failed: " + (r.error || "unknown"), "warn");
+          sfx.err();
+        } else {
+          toast(name + " installed — it is now in your library", "ok");
+          refreshLibrary(true, false);
+        }
+        rtRefresh();
+      }).catch(() => { toast("Install failed", "warn"); rtRefresh(); });
+    }
+  );
+}
+
 function renderRuntimeManager() {
   const col = $("#rt-col");
   if (!col) return;
@@ -1843,6 +1925,7 @@ function renderRuntimeManager() {
 
   col.innerHTML =
     '<div class="panel"><h3>Windows files waiting for you</h3>' + rtPendingRows() + "</div>" +
+    '<div class="panel"><h3>PS3 packages</h3>' + rtPs3Panel() + "</div>" +
     '<div class="panel"><h3>Runtimes</h3>' + rtRuntimeRows() +
       '<div class="row" data-x="0" data-y="50" data-action="rt-rescan">' + ic("refresh") +
       '<span class="info"><span class="k">Rescan runtimes</span><div class="d">Look for Wine, Steam, Proton and emulators again</div></span></div>' +

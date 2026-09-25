@@ -106,6 +106,39 @@ impl Decisions {
             serde_json::to_string_pretty(&pending).unwrap_or_default(),
         );
     }
+
+    // ------------------------- PS3 packages -------------------------
+
+    /// A PS3 package the user still has to confirm installing.
+    pub fn add_pending_pkg(&self, pkg: crate::runtime::ps3::Installable) {
+        let path = pkg.path.clone();
+        let mut pending = Self::load_pending_pkgs();
+        if let Some(existing) = pending.iter_mut().find(|p| p.path == path) {
+            *existing = pkg;
+        } else {
+            pending.push(pkg);
+        }
+        let _ = std::fs::write(
+            crate::util::data_dir().join("ps3-pending.json"),
+            serde_json::to_string_pretty(&pending).unwrap_or_default(),
+        );
+    }
+
+    pub fn load_pending_pkgs() -> Vec<crate::runtime::ps3::Installable> {
+        std::fs::read_to_string(crate::util::data_dir().join("ps3-pending.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn clear_pending_pkg(path: &Path) {
+        let mut pending = Self::load_pending_pkgs();
+        pending.retain(|p| p.path != path);
+        let _ = std::fs::write(
+            crate::util::data_dir().join("ps3-pending.json"),
+            serde_json::to_string_pretty(&pending).unwrap_or_default(),
+        );
+    }
 }
 
 #[cfg(test)]

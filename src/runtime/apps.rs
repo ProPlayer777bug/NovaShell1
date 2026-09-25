@@ -135,6 +135,17 @@ pub fn is_windows_executable(path: &Path) -> bool {
 /// asks for confirmation) instead of trying to execute it directly.
 pub const HANDLER_DESKTOP_ENTRY: &str = include_str!("windows-handler.desktop");
 
+/// XDG desktop entry for PS3 packages, so double-clicking a `.pkg` installs it
+/// through NovaShell instead of failing in Archive Manager ("not an archive").
+pub const PS3_HANDLER_DESKTOP_ENTRY: &str = include_str!("ps3-handler.desktop");
+
+/// Mime types Nova claims for PS3 packages.
+pub const PS3_MIME_TYPES: [&str; 3] = [
+    "application/x-ps3-pkg",
+    "application/x-ps3-rap",
+    "application/x-ps3-edat",
+];
+
 /// Install/refresh the Nova Windows handler associations for the given user.
 ///
 /// Uses the per-user XDG directories so this needs no root: the handler lives
@@ -150,7 +161,12 @@ pub fn install_file_associations(user_home: &Path) -> anyhow::Result<()> {
         apps_dir.join("novashell-windows-handler.desktop"),
         HANDLER_DESKTOP_ENTRY,
     )?;
+    std::fs::write(
+        apps_dir.join("novashell-ps3-handler.desktop"),
+        PS3_HANDLER_DESKTOP_ENTRY,
+    )?;
     std::fs::write(mime_dir.join("novashell-windows.xml"), windows_mime_xml())?;
+    std::fs::write(mime_dir.join("novashell-ps3.xml"), ps3_mime_xml())?;
     set_default_handler(user_home)?;
     // Refresh the user-local caches. These are best-effort: the files above are
     // already correct without them, and the tools may not be installed.
@@ -164,6 +180,14 @@ pub fn install_file_associations(user_home: &Path) -> anyhow::Result<()> {
             "xdg-mime",
             "default",
             "novashell-windows-handler.desktop",
+            mime,
+        ]);
+    }
+    for mime in PS3_MIME_TYPES {
+        quiet_status(&[
+            "xdg-mime",
+            "default",
+            "novashell-ps3-handler.desktop",
             mime,
         ]);
     }
@@ -206,6 +230,25 @@ pub fn windows_mime_xml() -> String {
     xml
 }
 
+/// Mime definitions for PS3 packages, so a `.pkg` is recognised as a package
+/// instead of being handed to Archive Manager.
+pub fn ps3_mime_xml() -> String {
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<mime-info xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\">\n",
+    );
+    for (mime, glob, comment) in [
+        ("application/x-ps3-pkg", "*.pkg", "PlayStation 3 package"),
+        ("application/x-ps3-rap", "*.rap", "PlayStation 3 key file"),
+        ("application/x-ps3-edat", "*.edat", "PlayStation 3 encrypted data"),
+    ] {
+        xml.push_str(&format!(
+            "  <mime-type type=\"{mime}\">\n    <comment>{comment}</comment>\n    <glob pattern=\"{glob}\"/>\n    <icon name=\"package-x-generic\"/>\n  </mime-type>\n"
+        ));
+    }
+    xml.push_str("</mime-info>\n");
+    xml
+}
+
 /// Set the default handler for the Windows mime types in a user's config.
 pub fn set_default_handler(user_home: &Path) -> anyhow::Result<()> {
     let config = user_home.join(".config");
@@ -215,6 +258,9 @@ pub fn set_default_handler(user_home: &Path) -> anyhow::Result<()> {
         list.push_str(&format!(
             "{mime}=novashell-windows-handler.desktop\n"
         ));
+    }
+    for mime in PS3_MIME_TYPES {
+        list.push_str(&format!("{mime}=novashell-ps3-handler.desktop\n"));
     }
     std::fs::write(config.join("mimeapps.list"), list)?;
     Ok(())
