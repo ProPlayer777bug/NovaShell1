@@ -1,0 +1,8 @@
+[Unit]
+Description=NovaShell GUI watchdog (restarts the shell when its window is gone)
+Documentation=https://github.com/ProPlayer777bug/NovaShell1
+
+[Service]
+Type=oneshot
+Environment=DISPLAY=:0
+ExecStart=/usr/local/bin/nova-watchdog
