@@ -317,6 +317,12 @@ struct AppState {
     ui_base: String,
     /// Icon/artwork path map served by that server, kept fresh on refresh.
     ui_icons: Arc<Mutex<std::collections::HashMap<String, std::path::PathBuf>>>,
+    /// Every process the Runtime Manager has launched, keyed by pid. The
+    /// `running` field above remains the single foreground session that drives
+    /// the taskbar and playtime accounting.
+    procs: crate::runtime::procs::ProcessManager,
+    /// Installed Windows applications/games (metadata catalogue).
+    win_apps: Arc<Mutex<Vec<crate::runtime::apps::WindowsApp>>>,
     main_loop: glib::MainLoop,
     opts: RunOptions,
 }
@@ -803,6 +809,10 @@ fn activate(
         helpers: Rc::new(RefCell::new(Vec::new())),
         ui_base,
         ui_icons,
+        procs: crate::runtime::procs::ProcessManager::new(),
+        win_apps: Arc::new(Mutex::new(
+            crate::runtime::apps::WindowsApp::load_all(),
+        )),
         main_loop: main_loop.clone(),
         opts: opts.clone(),
     });
@@ -996,6 +1006,325 @@ fn route(state: &AppState, msg: Value) {
         // Native file chooser for a game file — the same dialog a browser
         // shows for "upload file". The chosen path comes back to the UI as
         // `_rom_chosen`, which then boots the emulator with it.
+        // ---------------- Runtime Manager ----------------
+        "runtimes:list" => {
+            let runtimes = crate::runtime::detect_all();
+            reply(
+                state,
+                id,
+                json!({ "ok": true, "runtimes": serde_json::to_value(runtimes).unwrap_or(Value::Null) }),
+            );
+        }
+
+        "runtimes:detect" => {
+            let runtimes = crate::runtime::detect_all();
+            let _ = send_event(state, json!({ "event": "runtime.detected", "runtimes": runtimes }));
+            reply(
+                state,
+                id,
+                json!({ "ok": true, "runtimes": serde_json::to_value(runtimes).unwrap_or(Value::Null) }),
+            );
+        }
+
+        "runtimes:validate" => {
+            let runtime_id = msg["runtime"].as_str().unwrap_or("").to_string();
+            let mut target = crate::runtime::LaunchTarget::default();
+            if let Some(p) = msg["executable"].as_str() {
+                target.executable = Some(std::path::PathBuf::from(p));
+            }
+            if let Some(p) = msg["prefix"].as_str() {
+                target.prefix = Some(std::path::PathBuf::from(p));
+            }
+            let checks = crate::runtime::validate_runtime(&runtime_id, &target);
+            reply(state, id, json!({ "ok": true, "checks": checks }));
+        }
+
+        "prefixes:list" => {
+            reply(
+                state,
+                id,
+                json!({ "ok": true, "prefixes": crate::runtime::prefixes::list() }),
+            );
+        }
+
+        "prefixes:create" => {
+            let app_id = msg["id"].as_str().unwrap_or("").to_string();
+            let kind = match msg["kind"].as_str().unwrap_or("wine") {
+                "proton" => crate::runtime::prefixes::PrefixKind::Proton,
+                _ => crate::runtime::prefixes::PrefixKind::Wine,
+            };
+            // Long operation: create on a worker so the UI thread never blocks.
+            let sender = state.sender.clone();
+            let rid = id.to_string();
+            std::thread::Builder::new()
+                .name("novashell-prefix".into())
+                .spawn(move || {
+                    let result = crate::runtime::prefixes::create(kind, &app_id);
+                    let payload = match result {
+                        Ok(info) => json!({ "reply": true, "id": rid, "data": { "ok": true, "prefix": info } }),
+                        Err(e) => json!({ "reply": true, "id": rid, "data": { "ok": false, "error": e.to_string() } }),
+                    };
+                    let _ = sender.send(payload.to_string());
+                    let _ = sender.send(
+                        json!({ "event": "prefix.created", "id": app_id, "kind": kind_dir(kind) })
+                            .to_string(),
+                    );
+                })
+                .ok();
+        }
+
+        "prefixes:delete" => {
+            let app_id = msg["id"].as_str().unwrap_or("").to_string();
+            let kind = match msg["kind"].as_str().unwrap_or("wine") {
+                "proton" => crate::runtime::prefixes::PrefixKind::Proton,
+                _ => crate::runtime::prefixes::PrefixKind::Wine,
+            };
+            match crate::runtime::prefixes::delete(kind, &app_id) {
+                Ok(()) => {
+                    let _ = send_event(state, json!({ "event": "prefix.deleted", "id": app_id }));
+                    reply(state, id, json!({ "ok": true }));
+                }
+                Err(e) => reply(state, id, json!({ "ok": false, "error": e.to_string() })),
+            }
+        }
+
+        "prefixes:repair" => {
+            let app_id = msg["id"].as_str().unwrap_or("").to_string();
+            let kind = match msg["kind"].as_str().unwrap_or("wine") {
+                "proton" => crate::runtime::prefixes::PrefixKind::Proton,
+                _ => crate::runtime::prefixes::PrefixKind::Wine,
+            };
+            match crate::runtime::prefixes::repair(kind, &app_id) {
+                Ok(info) => reply(state, id, json!({ "ok": true, "prefix": info })),
+                Err(e) => reply(state, id, json!({ "ok": false, "error": e.to_string() })),
+            }
+        }
+
+        "procs:list" => {
+            reply(
+                state,
+                id,
+                json!({ "ok": true, "processes": state.procs.list() }),
+            );
+        }
+
+        "procs:stop" | "procs:kill" => {
+            let pid = msg["pid"].as_u64().unwrap_or(0) as u32;
+            let outcome = if id.ends_with("kill") || msg["force"].as_bool().unwrap_or(false) {
+                state.procs.kill(pid)
+            } else {
+                state.procs.stop(pid)
+            };
+            match outcome {
+                Ok(()) => reply(state, id, json!({ "ok": true })),
+                Err(e) => reply(state, id, json!({ "ok": false, "error": e.to_string() })),
+            }
+        }
+
+        "runtime:logs" => {
+            let app_id = msg["id"].as_str().unwrap_or("").to_string();
+            let lines = msg["lines"].as_u64().unwrap_or(200).min(2000) as usize;
+            reply(
+                state,
+                id,
+                json!({ "ok": true, "lines": crate::runtime::logs::tail(&app_id, lines) }),
+            );
+        }
+
+        // Windows application catalogue.
+        "windows:apps" => {
+            let apps = state.win_apps.lock().map(|g| g.clone()).unwrap_or_default();
+            reply(state, id, json!({ "ok": true, "apps": apps }));
+        }
+
+        // Inspect a file the user picked: is it a Windows binary, an installer,
+        // and does it look like a game? Nothing is executed here.
+        "windows:inspect" => {
+            let path = msg["path"].as_str().unwrap_or("").to_string();
+            let p = std::path::Path::new(&path);
+            let guess = crate::runtime::apps::guess_if_game(p);
+            reply(
+                state,
+                id,
+                json!({
+                    "ok": true,
+                    "path": path,
+                    "exists": p.is_file(),
+                    "is_windows_executable": crate::runtime::apps::is_windows_executable(p),
+                    "is_installer": crate::runtime::apps::is_installer(p),
+                    "guess_game": guess.is_game,
+                    "reasons": guess.reasons,
+                    "size": std::fs::metadata(p).map(|m| m.len()).unwrap_or(0),
+                }),
+            );
+        }
+
+        "windows:app:add" => {
+            let app = match windows_app_from_msg(&msg) {
+                Ok(a) => a,
+                Err(e) => {
+                    reply(state, id, json!({ "ok": false, "error": e.to_string() }));
+                    return;
+                }
+            };
+            let saved = {
+                let mut apps = match state.win_apps.lock() {
+                    Ok(g) => g,
+                    Err(_) => {
+                        reply(state, id, json!({ "ok": false, "error": "state unavailable" }));
+                        return;
+                    }
+                };
+                crate::runtime::apps::WindowsApp::upsert(&mut apps, app.clone());
+                crate::runtime::apps::WindowsApp::save_all(&apps)
+            };
+            match saved {
+                Ok(()) => {
+                    // Make it visible in the existing Nova library.
+                    if let Err(e) = add_windows_app_to_library(state, &app) {
+                        log::warn!("could not add {} to library: {e}", app.name);
+                    }
+                    let _ = send_event(state, json!({ "event": "application.installed", "app": app }));
+                    reply(state, id, json!({ "ok": true, "app": app }));
+                }
+                Err(e) => reply(state, id, json!({ "ok": false, "error": e.to_string() })),
+            }
+        }
+
+        "windows:app:remove" => {
+            let app_id = msg["id"].as_str().unwrap_or("").to_string();
+            let result = {
+                let mut apps = match state.win_apps.lock() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        reply(state, id, json!({ "ok": false, "error": e.to_string() }));
+                        return;
+                    }
+                };
+                apps.retain(|a| a.id != app_id);
+                crate::runtime::apps::WindowsApp::save_all(&apps)
+            };
+            let _ = state.library.borrow_mut().delete_key(&app_id);
+            let _ = state.library.borrow_mut().save();
+            let _ = send_event(state, json!({ "event": "library_changed" }));
+            match result {
+                Ok(()) => reply(state, id, json!({ "ok": true })),
+                Err(e) => reply(state, id, json!({ "ok": false, "error": e.to_string() })),
+            }
+        }
+
+        // Launch a stored Windows application through its runtime.
+        "windows:launch" => {
+            let app_id = msg["id"].as_str().unwrap_or("").to_string();
+            let app = state
+                .win_apps
+                .lock()
+                .ok()
+                .and_then(|apps| apps.iter().find(|a| a.id == app_id).cloned());
+            match app {
+                Some(app) => match launch_windows_app(state, &app) {
+                    Ok(()) => reply(state, id, json!({ "ok": true, "pid": true })),
+                    Err(e) => reply(state, id, json!({ "ok": false, "error": e.to_string() })),
+                },
+                None => reply(state, id, json!({ "ok": false, "error": "app not found" })),
+            }
+        }
+
+        // Run a Windows installer in its own prefix. The installer runs
+        // asynchronously: a cold `wineboot` is slow, and the UI must not block.
+        "windows:install" => {
+            let installer = msg["path"].as_str().unwrap_or("").to_string();
+            let app_id = msg["id"].as_str().unwrap_or("").to_string();
+            let name = msg["name"].as_str().unwrap_or(&app_id).to_string();
+            let safe_id = match crate::runtime::security::safe_segment(&app_id) {
+                Ok(v) => v,
+                Err(e) => {
+                    reply(state, id, json!({ "ok": false, "error": e.to_string() }));
+                    return;
+                }
+            };
+            if let Err(e) = crate::runtime::security::ensure_not_root() {
+                reply(state, id, json!({ "ok": false, "error": e.to_string() }));
+                return;
+            }
+            let installer_path = std::path::PathBuf::from(&installer);
+            if !installer_path.is_file() {
+                reply(state, id, json!({ "ok": false, "error": "installer not found" }));
+                return;
+            }
+            if !crate::runtime::apps::is_windows_executable(&installer_path) {
+                reply(
+                    state,
+                    id,
+                    json!({ "ok": false, "error": "not a Windows executable or installer" }),
+                );
+                return;
+            }
+            // Always a fresh, per-application prefix, owned by the user who
+            // will run it (Wine refuses prefixes owned by anyone else).
+            let prefix = match crate::runtime::wine::WineRuntime::resolve_owned_prefix(&safe_id) {
+                Ok(p) => p,
+                Err(e) => {
+                    reply(state, id, json!({ "ok": false, "error": e.to_string() }));
+                    return;
+                }
+            };
+            let rid = id.to_string();
+            let reply_sender = state.sender.clone();
+            let event_sender = state.sender.clone();
+            std::thread::Builder::new()
+                .name("novashell-wineinstall".into())
+                .spawn(move || {
+                    use crate::runtime::Runtime as _;
+                    let mut rt = crate::runtime::wine::WineRuntime::new();
+                    let _ = rt.detect();
+                    let outcome = rt.init_prefix(&prefix, 300).and_then(|_| {
+                        let mut target = crate::runtime::LaunchTarget::new(&safe_id, &name)
+                            .with_executable(installer_path.clone());
+                        target.prefix = Some(prefix.clone());
+                        let spec = rt.build_spec(&target)?;
+                        crate::launcher::spawn(&spec)?;
+                        Ok::<(), anyhow::Error>(())
+                    });
+                    match outcome {
+                        Ok(()) => {
+                            let _ = reply_sender.send(
+                                json!({
+                                    "reply": true,
+                                    "id": rid,
+                                    "data": { "ok": true, "prefix": prefix, "started": true },
+                                })
+                                .to_string(),
+                            );
+                            let _ = event_sender.send(
+                                json!({ "event": "application.installation.started", "id": safe_id })
+                                    .to_string(),
+                            );
+                        }
+                        Err(e) => {
+                            let _ = reply_sender.send(
+                                json!({
+                                    "reply": true,
+                                    "id": rid,
+                                    "data": { "ok": false, "error": e.to_string() },
+                                })
+                                .to_string(),
+                            );
+                            let _ = event_sender.send(
+                                json!({
+                                    "event": "application.installation.failed",
+                                    "id": safe_id,
+                                    "error": e.to_string(),
+                                })
+                                .to_string(),
+                            );
+                        }
+                    }
+                })
+                .ok();
+        }
+
+        // ---------------- ROM routes (existing) ----------------
         "roms:choose" => {
             let game_id = msg["id"].as_str().unwrap_or("").to_string();
             match state.library.borrow().get(&game_id) {
@@ -1394,6 +1723,163 @@ fn url_encode(raw: &str) -> String {
     out
 }
 
+
+/// Directory name for a prefix kind, for events and the UI.
+fn kind_dir(kind: crate::runtime::prefixes::PrefixKind) -> &'static str {
+    kind.dir_name()
+}
+
+/// Build a `WindowsApp` from a bridge message, validating every path first.
+fn windows_app_from_msg(
+    msg: &Value,
+) -> anyhow::Result<crate::runtime::apps::WindowsApp> {
+    use crate::runtime::apps::{AppKind, WindowsApp};
+    use crate::runtime::prefixes::PrefixKind;
+
+    let id = msg["id"].as_str().unwrap_or("").to_string();
+    // Validated: the id becomes a directory name.
+    let safe_id = crate::runtime::security::safe_segment(&id)?;
+    let name = msg["name"].as_str().unwrap_or(&id).to_string();
+    let kind = match msg["kind"].as_str().unwrap_or("windows-app") {
+        "windows-game" | "game" => AppKind::WindowsGame,
+        _ => AppKind::WindowsApp,
+    };
+    let runtime_id = msg["runtime"].as_str().unwrap_or("wine").to_string();
+    let executable = msg["executable"].as_str().unwrap_or("").to_string();
+    if executable.is_empty() {
+        anyhow::bail!("no executable given");
+    }
+    let exe_path = std::path::PathBuf::from(&executable);
+    if !exe_path.is_file() {
+        anyhow::bail!("executable not found: {executable}");
+    }
+    // Windows executables must never be launched as root.
+    crate::runtime::security::ensure_not_root()?;
+
+    let prefix_kind = match kind {
+        AppKind::WindowsGame => PrefixKind::Proton,
+        AppKind::WindowsApp => PrefixKind::Wine,
+    };
+    let prefix = match msg["prefix"].as_str() {
+        Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
+        // Wine prefixes must belong to the user running them.
+        _ if kind == AppKind::WindowsApp => {
+            crate::runtime::wine::WineRuntime::resolve_owned_prefix(&safe_id)?
+        }
+        _ => crate::runtime::prefixes::prefix_path(prefix_kind, &safe_id)?,
+    };
+
+    let mut app = WindowsApp::new(&safe_id, &name, kind, &runtime_id);
+    app.prefix = prefix;
+    app.executable = exe_path;
+    app.working_directory = msg["workingDirectory"]
+        .as_str()
+        .map(std::path::PathBuf::from);
+    app.arguments = msg
+        .get("arguments")
+        .and_then(|a| a.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    // Environment is filtered through the allowlist, never taken verbatim.
+    if let Some(env) = msg.get("environment").and_then(|e| e.as_object()) {
+        let mut map = std::collections::BTreeMap::new();
+        for (k, v) in env {
+            if let Some(s) = v.as_str() {
+                map.insert(k.clone(), s.to_string());
+            }
+        }
+        app.environment = crate::runtime::security::filter_env(&map);
+    }
+    Ok(app)
+}
+
+/// Add an installed Windows application to the existing Nova library so it
+/// shows up on the home/library screens like any other title.
+fn add_windows_app_to_library(
+    state: &AppState,
+    app: &crate::runtime::apps::WindowsApp,
+) -> anyhow::Result<()> {
+    let game = Game {
+        id: app.id.clone(),
+        title: app.name.clone(),
+        source: app.kind.as_str().to_string(),
+        launch: Launch::Program {
+            program: app.executable.to_string_lossy().to_string(),
+            args: app.arguments.clone(),
+        },
+        icon: app.icon.clone(),
+        artwork: None,
+        last_played: app.last_played,
+        playtime_secs: app.play_time_secs,
+        favorite: false,
+        installed: true,
+        platform: Some("Windows".to_string()),
+        rom_exts: Vec::new(),
+        rom_dir: None,
+    };
+    let mut lib = state.library.borrow_mut();
+    lib.set(game)?;
+    Ok(())
+}
+
+/// Spawn a process without waiting for it, returning its pid.
+fn spawn_detached(spec: &Spec) -> Result<u32> {
+    let mut child = crate::launcher::spawn(spec)?;
+    let pid = child.id();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(pid)
+}
+
+/// Launch a stored Windows application through its runtime.
+fn launch_windows_app(state: &AppState, app: &crate::runtime::apps::WindowsApp) -> Result<()> {
+    crate::runtime::security::ensure_not_root()?;
+    if !app.executable.is_file() {
+        anyhow::bail!("executable is missing: {}", app.executable.display());
+    }
+
+    let runtimes = crate::runtime::registry();
+    let mut target = crate::runtime::LaunchTarget::new(&app.id, &app.name)
+        .with_executable(app.executable.clone())
+        .with_game(matches!(app.kind, crate::runtime::apps::AppKind::WindowsGame));
+    target.prefix = Some(app.prefix.clone());
+    target.args = app.arguments.clone();
+    target.env = app.environment.clone();
+    target.working_dir = app.working_directory.clone();
+    target.runtime_override = Some(app.runtime.clone());
+
+    let runtime = crate::runtime::select(&runtimes, &target)
+        .ok_or_else(|| anyhow!("no runtime available for {}", app.runtime))?;
+    let checks = runtime.validate(&target);
+    if let Some(bad) = checks.iter().find(|c| !c.ok) {
+        log::warn!("pre-flight failed: {} ({:?})", bad.label, bad.detail);
+    }
+    let spec = runtime.build_spec(&target)?;
+    let log = crate::runtime::logs::LaunchLog::create(&app.id)?;
+    log.write_launch(
+        &spec.program,
+        &spec.args,
+        &spec.env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+    );
+
+    let pid = spawn_detached(&spec)?;
+    let mut info = crate::runtime::procs::describe(
+        &spec,
+        &app.id,
+        &app.runtime,
+        app.prefix.to_str(),
+    );
+    info.pid = pid;
+    info.state = crate::runtime::procs::ProcessState::Running;
+    state.procs.insert(info);
+    send_event(state, json!({ "event": "application.started", "id": app.id, "pid": pid }));
+    Ok(())
+}
 
 fn settings_set(state: &AppState, msg: &Value) {
     let mut cfg = state.config.borrow().clone();
@@ -2008,6 +2494,19 @@ fn launch_spec(state: &AppState, spec: &Spec, library_id: Option<&str>) -> Resul
     let child = crate::launcher::spawn(spec)?;
     let title = spec.name.clone();
     let pid = child.id();
+    // Register with the Runtime Manager's process table so stop/kill and the
+    // taskbar can see it alongside Wine/Proton sessions.
+    {
+        let mut info = crate::runtime::procs::describe(
+            spec,
+            library_id.unwrap_or_default(),
+            "shell",
+            None,
+        );
+        info.pid = pid;
+        info.state = crate::runtime::procs::ProcessState::Running;
+        state.procs.insert(info);
+    }
     {
         let mut running = state.running.borrow_mut();
         *running = Some(RunningSession {

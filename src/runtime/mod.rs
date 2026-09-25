@@ -234,12 +234,27 @@ pub fn registry() -> Vec<Box<dyn Runtime>> {
 
 /// Detect every runtime once and return their current state.
 pub fn detect_all() -> Vec<RuntimeInfo> {
-    registry().into_iter().map(|mut r| {
-        let status = r.detect();
-        let mut info = r.info();
-        info.status = status;
-        info
-    }).collect()
+    registry()
+        .into_iter()
+        .map(|mut r| {
+            let status = r.detect();
+            let mut info = r.info();
+            info.status = status;
+            info
+        })
+        .collect()
+}
+
+/// Pre-flight checks for one runtime id, detecting it first. Used by the
+/// bridge so the UI never has to hold a runtime handle.
+pub fn validate_runtime(runtime_id: &str, target: &LaunchTarget) -> Vec<Check> {
+    for mut r in registry() {
+        if r.info().id == runtime_id {
+            r.detect();
+            return r.validate(target);
+        }
+    }
+    vec![Check::fail("Runtime", "unknown runtime")]
 }
 
 /// Pick the runtime that should handle a target, honouring an explicit

@@ -229,7 +229,12 @@ impl Library {
 
     /// Add or replace a manually-defined game.
     pub fn add_manual(&mut self, game: Game) -> Result<()> {
-        self.merge(vec![game]);
+        self.set(game)
+    }
+
+    /// Insert or replace a library entry.
+    pub fn set(&mut self, game: Game) -> Result<()> {
+        self.games.insert(game.id.clone(), game);
         self.save()
     }
 

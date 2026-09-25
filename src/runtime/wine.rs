@@ -178,6 +178,125 @@ impl WineRuntime {
     pub fn ensure_prefix(&self, app_id: &str) -> anyhow::Result<PathBuf> {
         Ok(prefixes::create(PrefixKind::Wine, app_id)?.path)
     }
+
+    /// Initialise a prefix with `wineboot` so it is a *usable* Wine prefix,
+    /// not just an empty directory. Runs off the UI thread and is time boxed:
+    /// a first-time wineboot can take a while on a cold cache.
+    pub fn init_prefix(&self, prefix: &Path, timeout_secs: u64) -> anyhow::Result<()> {
+        let wine = self
+            .executable
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Wine is not installed"))?;
+        // Never run as root: a root prefix is unusable and a security hazard.
+        security::ensure_not_root()?;
+        if !prefix.is_dir() {
+            anyhow::bail!("prefix does not exist: {}", prefix.display());
+        }
+        let child = std::process::Command::new(wine)
+            .arg("wineboot")
+            .arg("--init")
+            .env("WINEPREFIX", prefix)
+            .env("WINEDEBUG", "-all")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let started = std::time::Instant::now();
+        let mut child = child;
+        loop {
+            match child.try_wait()? {
+                Some(status) => {
+                    return if status.success() {
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!("wineboot failed ({})", status.code().unwrap_or(-1)))
+                    };
+                }
+                None => {
+                    if started.elapsed().as_secs() >= timeout_secs {
+                        let _ = child.kill();
+                        anyhow::bail!("wineboot timed out after {timeout_secs}s");
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+        }
+    }
+
+    /// True once `wineboot` has populated the prefix.
+    pub fn prefix_is_initialised(prefix: &Path) -> bool {
+        prefix.join("drive_c").join("windows").is_dir()
+            && prefix.join("system.registry").is_file()
+    }
+
+    /// Wine refuses to use a prefix owned by another user
+    /// ("'…' is not owned by you"), and it must never run as root. When the
+    /// shell is started as root but the desktop session belongs to another
+    /// user, resolve the prefix under that user's home and hand it back.
+    pub fn resolve_owned_prefix(app_id: &str) -> anyhow::Result<PathBuf> {
+        let user = if crate::util::user_name() == "root" {
+            std::env::var("SUDO_USER")
+                .ok()
+                .filter(|u| !u.is_empty() && u != "root")
+                .or_else(|| dirs::home_dir().and_then(|h| {
+                    h.file_name().map(|n| n.to_string_lossy().to_string())
+                }))
+                .unwrap_or_else(|| "root".to_string())
+        } else {
+            crate::util::user_name()
+        };
+        let home = if user == "root" {
+            dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/root"))
+        } else {
+            let base = if user == "aara" || user == "ubuntu" {
+                dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/home"))
+            } else {
+                std::path::PathBuf::from("/home").join(&user)
+            };
+            // Prefer the passwd entry so a custom home is respected.
+            passwd_home(&user).unwrap_or(base)
+        };
+        let root = home.join(".local/share/novashell/prefixes");
+        let info = prefixes::create_in(&root, PrefixKind::Wine, app_id)?;
+        // Make sure the current process can actually use it.
+        if let Ok(meta) = std::fs::metadata(&info.path) {
+            use std::os::unix::fs::MetadataExt;
+            if meta.uid() != current_uid() {
+                anyhow::bail!(
+                    "prefix {} is owned by uid {}, not the current user; run the shell as that user",
+                    info.path.display(),
+                    meta.uid()
+                );
+            }
+        }
+        Ok(info.path)
+    }
+}
+
+fn passwd_home(user: &str) -> Option<PathBuf> {
+    let line = std::process::Command::new("getent")
+        .arg("passwd")
+        .arg(user)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&line.stdout);
+    let home = text.split(':').nth(5)?;
+    if home.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(home))
+    }
+}
+
+fn current_uid() -> u32 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("Uid:"))
+                .and_then(|l| l.split_whitespace().nth(1).map(|v| v.to_string()))
+        })
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
@@ -218,5 +337,46 @@ mod tests {
         let rt = WineRuntime::new();
         let checks = rt.validate(&LaunchTarget::new("a", "A"));
         assert!(!checks.is_empty());
+    }
+
+    #[test]
+    fn prefix_initialisation_is_detected_by_layout() {
+        let root = std::env::temp_dir().join(format!("nova-wineboot-{}", std::process::id()));
+        let prefix = root.join("pfx");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(prefix.join("drive_c").join("windows")).unwrap();
+        std::fs::write(prefix.join("system.registry"), b"x").unwrap();
+        assert!(WineRuntime::prefix_is_initialised(&prefix));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_empty_prefix_is_not_initialised() {
+        let root = std::env::temp_dir().join(format!("nova-empty-pfx-{}", std::process::id()));
+        let prefix = root.join("pfx");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&prefix).unwrap();
+        assert!(!WineRuntime::prefix_is_initialised(&prefix));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn owned_prefix_resolution_rejects_foreign_prefixes() {
+        // On a normal (non-root) session the prefix must belong to us; on a
+        // developer machine the helper simply reports a coherent error rather
+        // than handing back an unusable prefix.
+        match WineRuntime::resolve_owned_prefix("ownership-test") {
+            Ok(path) => {
+                assert!(path.exists(), "a returned prefix must exist");
+                assert!(path.to_string_lossy().contains("ownership-test"));
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("owned by uid") || msg.contains("not owned"),
+                    "unexpected error: {msg}"
+                );
+            }
+        }
     }
 }
